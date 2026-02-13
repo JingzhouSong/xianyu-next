@@ -238,6 +238,15 @@ class DBManager:
                 self._execute_sql(cursor, "ALTER TABLE keywords ADD COLUMN item_id TEXT")
                 logger.info("keywords 表 item_id 列添加完成")
 
+            # 检查并添加 require_confirm_delivery 列（用于买家确认收货后才发货功能）
+            try:
+                self._execute_sql(cursor, "SELECT require_confirm_delivery FROM item_info LIMIT 1")
+            except sqlite3.OperationalError:
+                # require_confirm_delivery 列不存在，需要添加
+                logger.info("正在为 item_info 表添加 require_confirm_delivery 列...")
+                self._execute_sql(cursor, "ALTER TABLE item_info ADD COLUMN require_confirm_delivery BOOLEAN DEFAULT FALSE")
+                logger.info("item_info 表 require_confirm_delivery 列添加完成")
+
             # 创建商品信息表
             cursor.execute('''
             CREATE TABLE IF NOT EXISTS item_info (
@@ -3373,6 +3382,66 @@ class DBManager:
 
         except Exception as e:
             logger.error(f"获取商品多规格状态失败: {e}")
+            return False
+
+    def update_item_confirm_delivery_status(self, cookie_id: str, item_id: str, require_confirm: bool) -> bool:
+        """更新商品的"需确认收货后才发货"状态
+
+        Args:
+            cookie_id: Cookie ID
+            item_id: 商品ID
+            require_confirm: 是否需要买家确认收货后才发货
+
+        Returns:
+            bool: 操作是否成功
+        """
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                cursor.execute('''
+                UPDATE item_info
+                SET require_confirm_delivery = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE cookie_id = ? AND item_id = ?
+                ''', (require_confirm, cookie_id, item_id))
+
+                if cursor.rowcount > 0:
+                    self.conn.commit()
+                    logger.info(f"更新商品确认收货发货状态成功: {item_id} -> {require_confirm}")
+                    return True
+                else:
+                    logger.warning(f"商品不存在，无法更新确认收货发货状态: {item_id}")
+                    return False
+
+        except Exception as e:
+            logger.error(f"更新商品确认收货发货状态失败: {e}")
+            self.conn.rollback()
+            return False
+
+    def get_item_confirm_delivery_status(self, cookie_id: str, item_id: str) -> bool:
+        """获取商品的"需确认收货后才发货"状态
+
+        Args:
+            cookie_id: Cookie ID
+            item_id: 商品ID
+
+        Returns:
+            bool: 是否需要买家确认收货后才发货，默认False
+        """
+        try:
+            with self.lock:
+                cursor = self.conn.cursor()
+                cursor.execute('''
+                SELECT require_confirm_delivery FROM item_info
+                WHERE cookie_id = ? AND item_id = ?
+                ''', (cookie_id, item_id))
+
+                row = cursor.fetchone()
+                if row:
+                    return bool(row[0]) if row[0] is not None else False
+                return False
+
+        except Exception as e:
+            logger.error(f"获取商品确认收货发货状态失败: {e}")
             return False
 
     def get_items_by_cookie(self, cookie_id: str) -> List[Dict]:

@@ -74,11 +74,6 @@
   .sidebar-nav::-webkit-scrollbar-thumb {
     background: rgba(255, 255, 255, 0.3);
     border-radius: 3px;
-    transition: background 0.3s ease;
-  }
-
-  .sidebar-nav::-webkit-scrollbar-thumb:hover {
-    background: rgba(255, 255, 255, 0.5);
   }
 
   /* Firefox滚动条样式 */
@@ -97,14 +92,7 @@
     padding: 0.75rem 1.5rem;
     color: rgba(255,255,255,0.8);
     text-decoration: none;
-    transition: all 0.3s ease;
     border-left: 3px solid transparent;
-  }
-
-  .nav-link:hover {
-    color: white;
-    background: rgba(255,255,255,0.1);
-    border-left-color: rgba(255,255,255,0.5);
   }
 
   .nav-link.active {
@@ -196,12 +184,6 @@
     padding: 1.5rem;
     box-shadow: var(--shadow-sm);
     border: 1px solid var(--border-color);
-    transition: all 0.3s ease;
-  }
-
-  .stat-card:hover {
-    transform: translateY(-2px);
-    box-shadow: var(--shadow-md);
   }
 
   .stat-icon {
@@ -324,17 +306,12 @@
     border-radius: 4px;
   }
 
-  .log-container::-webkit-scrollbar-thumb:hover {
-    background: #5a5a5c;
-  }
-
   /* 关键词管理现代化样式 */
   .keyword-container {
     background: white;
     border-radius: 16px;
     box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
     overflow: hidden;
-    transition: all 0.3s ease;
   }
 
   .keyword-header {
@@ -414,15 +391,9 @@
     padding: 1rem 1.5rem;
     font-weight: 600;
     cursor: pointer;
-    transition: all 0.3s ease;
     display: flex;
     align-items: center;
     gap: 0.5rem;
-  }
-
-  .add-btn:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 25px rgba(16, 185, 129, 0.3);
   }
 
   .add-btn:active {
@@ -440,14 +411,7 @@
     border: 1px solid #e5e7eb;
     border-radius: 12px;
     margin-bottom: 1rem;
-    transition: all 0.3s ease;
     overflow: hidden;
-  }
-
-  .keyword-item:hover {
-    border-color: #667eea;
-    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.15);
-    transform: translateY(-1px);
   }
 
   .keyword-item-header {
@@ -482,7 +446,6 @@
     border: none;
     border-radius: 8px;
     cursor: pointer;
-    transition: all 0.3s ease;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -493,30 +456,15 @@
     color: #6b7280;
   }
 
-  .edit-btn:hover {
-    background: #e5e7eb;
-    color: #374151;
-  }
-
   .edit-btn-disabled {
     background: #f9fafb !important;
     color: #9ca3af !important;
     cursor: not-allowed !important;
   }
 
-  .edit-btn-disabled:hover {
-    background: #f9fafb !important;
-    color: #9ca3af !important;
-  }
-
   .delete-btn {
     background: #fef2f2;
     color: #ef4444;
-  }
-
-  .delete-btn:hover {
-    background: #fee2e2;
-    color: #dc2626;
   }
 
   .keyword-content {
@@ -560,12 +508,6 @@
     padding: 0.75rem 1.5rem;
     font-weight: 500;
     cursor: pointer;
-    transition: all 0.3s ease;
-  }
-
-  .quick-add-btn:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 25px rgba(102, 126, 234, 0.3);
   }
 
   /* 账号选择器现代化 */
@@ -774,13 +716,7 @@
     border: 1px solid rgba(255, 255, 255, 0.2);
     border-radius: 16px;
     box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-    transition: all 0.3s ease;
     margin-bottom: 2rem;
-  }
-
-  .card:hover {
-    transform: translateY(-4px);
-    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
   }
 
   .card-header {
@@ -799,13 +735,7 @@
   .btn {
     border-radius: 10px;
     font-weight: 500;
-    transition: all 0.3s ease;
     padding: 0.5rem 1rem;
-  }
-
-  .btn:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
   }
 
   .btn-primary {
@@ -826,12 +756,6 @@
   .btn-outline-primary {
     border: 2px solid var(--primary-color);
     color: var(--primary-color);
-  }
-
-  .btn-outline-primary:hover {
-    background: var(--primary-color);
-    border-color: var(--primary-color);
-    color: white;
   }
 
   .btn-outline-success {
@@ -887,8 +811,7 @@
     vertical-align: middle;
   }
 
-  .table tbody tr:hover {
-    background: rgba(79, 70, 229, 0.02);
+  .table tbody tr {
   }
   .badge {
     font-weight: 500;
@@ -960,14 +883,12 @@
   .form-control, .form-select {
     border-radius: 10px;
     border: 2px solid var(--border-color);
-    transition: all 0.3s ease;
     padding: 0.75rem 1rem;
   }
 
   .form-control:focus, .form-select:focus {
     border-color: var(--primary-color);
     box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.1);
-    transform: translateY(-1px);
   }
 
   .form-label {
@@ -1194,7 +1115,6 @@
   /* 通知渠道卡片样式 */
   .channel-type-card {
     cursor: pointer;
-    transition: all 0.3s ease;
     border: 2px solid transparent;
     min-height: 180px; /* 设置最小高度，让卡片更紧凑 */
   }
@@ -1204,7 +1124,6 @@
   }
 
   .channel-type-card .channel-icon {
-    transition: transform 0.3s ease;
     margin-bottom: 0.75rem !important; /* 减少图标下方间距 */
   }
 
@@ -1293,11 +1212,6 @@
     background: linear-gradient(135deg, #28a745, #20c997) !important;
     border: none !important;
     margin-left: 10px;
-  }
-
-  .btn-image:hover {
-    background: linear-gradient(135deg, #218838, #1ea085) !important;
-    transform: translateY(-1px);
   }
 
   .keyword-input-group {
