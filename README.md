@@ -1,7 +1,7 @@
 # 🐟 闲鱼自动回复系统
 
-[![GitHub](https://img.shields.io/badge/GitHub-zhinianboke%2Fxianyu--auto--reply-blue?logo=github)](https://github.com/zhinianboke/xianyu-auto-reply)
-[![Docker](https://img.shields.io/badge/Docker-一键部署-blue?logo=docker)](https://github.com/zhinianboke/xianyu-auto-reply#-快速开始)
+[![GitHub](https://img.shields.io/badge/GitHub-HJYHJYHJY%2Fxianyu--auto--reply-blue?logo=github)](https://github.com/HJYHJYHJY/xianyu-auto-reply)
+[![Docker](https://img.shields.io/badge/Docker-一键部署-blue?logo=docker)](https://github.com/HJYHJYHJY/xianyu-auto-reply#-快速开始)
 [![Python](https://img.shields.io/badge/Python-3.11+-green?logo=python)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-仅供学习-red.svg)](#️-版权声明与使用条款)
 
@@ -173,7 +173,7 @@ docker run -d -p 8080:8080 -v %cd%/xianyu-auto-reply/:/app/data/ --name xianyu-a
 
 ```bash
 # 1. 克隆项目
-git clone https://github.com/zhinianboke/xianyu-auto-reply.git
+git clone https://github.com/HJYHJYHJY/xianyu-auto-reply.git
 cd xianyu-auto-reply
 
 # 2. 设置脚本执行权限（Linux/macOS）
@@ -202,7 +202,7 @@ docker-compose up -d --build
 
 ```bash
 # 1. 克隆项目
-git clone https://github.com/zhinianboke/xianyu-auto-reply.git
+git clone https://github.com/HJYHJYHJY/xianyu-auto-reply.git
 cd xianyu-auto-reply
 
 # 2. 创建虚拟环境（推荐）
@@ -494,7 +494,7 @@ python Start.py
 欢迎为项目做出贡献！您可以通过以下方式参与：
 
 ### 📝 提交问题
-- 在 [GitHub Issues](https://github.com/zhinianboke/xianyu-auto-reply/issues) 中报告Bug
+- 在 [GitHub Issues](https://github.com/HJYHJYHJY/xianyu-auto-reply/issues) 中报告Bug
 - 提出新功能建议和改进意见
 - 分享使用经验和最佳实践
 
@@ -545,7 +545,7 @@ docker-compose up -d
 
 ```bash
 # 克隆项目并从源码构建
-git clone https://github.com/zhinianboke/xianyu-auto-reply.git
+git clone https://github.com/HJYHJYHJY/xianyu-auto-reply.git
 cd xianyu-auto-reply
 ./docker-deploy.sh
 ```
@@ -620,8 +620,8 @@ powershell -ExecutionPolicy Bypass -File docker-deploy.bat
 
 ### 👤 原作者信息
 
-- **项目作者**：zhinianboke
-- **项目地址**：https://github.com/zhinianboke/xianyu-auto-reply
+- **项目作者**：HJYHJYHJY
+- **项目地址**：https://github.com/HJYHJYHJY/xianyu-auto-reply
 - **联系方式**：通过GitHub Issues或项目交流群
 
 ### ⚠️ 免责声明
@@ -635,7 +635,7 @@ powershell -ExecutionPolicy Bypass -File docker-deploy.bat
 
 如发现本项目存在侵权内容，请通过以下方式联系：
 
-- **GitHub Issues**：https://github.com/zhinianboke/xianyu-auto-reply/issues
+- **GitHub Issues**：https://github.com/HJYHJYHJY/xianyu-auto-reply/issues
 - **邮箱联系**：在项目交流群中获取联系方式
 
 我们将在收到通知后**立即处理**并删除相关内容。
