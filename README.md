@@ -208,6 +208,11 @@ python -m venv venv
 source venv/bin/activate  # Linux/macOS
 # 或 venv\Scripts\activate  # Windows
 
+# conda
+conda create --prefix d:/conda_envs/xianyu python=3.11 -y
+conda activate d:/conda_envs/xianyu
+
+
 # 3. 安装Python依赖
 pip install --upgrade pip
 pip install -r requirements.txt

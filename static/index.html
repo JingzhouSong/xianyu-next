@@ -238,13 +238,23 @@
                 <strong>提示：</strong>推荐使用扫码登录，更加安全便捷。如需手动输入，请确保Cookie信息的准确性。
               </div>
               <form id="addForm" class="row g-3">
-                <div class="col-md-3">
+                <div class="col-md-6">
                   <label for="cookieId" class="form-label">账号ID</label>
-                  <input type="text" class="form-control" id="cookieId" placeholder="唯一标识" required>
+                  <input type="text" class="form-control" id="cookieId" placeholder="例如 unb 或自定义" required>
                 </div>
-                <div class="col-md-9">
-                  <label for="cookieValue" class="form-label">Cookie值</label>
-                  <input type="text" class="form-control" id="cookieValue" placeholder="完整Cookie字符串" required>
+                <div class="col-md-6">
+                  <label for="cookieAlias" class="form-label">备注（可选）</label>
+                  <input type="text" class="form-control" id="cookieAlias" placeholder="如：主号、店铺A" maxlength="32">
+                </div>
+                <div class="col-12">
+                  <label for="cookieValue" class="form-label d-flex justify-content-between align-items-center">
+                    <span>Cookie值</span>
+                    <small class="text-muted">长度: <span id="cookieValueCounter">0</span> 字符</small>
+                  </label>
+                  <textarea class="form-control" id="cookieValue" rows="10"
+                            style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; white-space: pre; word-break: break-all;"
+                            placeholder="粘贴完整 Cookie 字符串，必须包含 unb / cookie2 / _m_h5_tk / _m_h5_tk_enc 等字段"
+                            spellcheck="false" required></textarea>
                 </div>
                 <div class="col-12">
                   <button type="submit" class="btn btn-primary">
@@ -278,13 +288,14 @@
                 <thead>
                   <tr>
                     <th style="width: 10%">账号ID</th>
-                    <th style="width: 18%">Cookie值</th>
-                    <th style="width: 8%">关键词</th>
-                    <th style="width: 8%">状态</th>
-                    <th style="width: 9%">默认回复</th>
-                    <th style="width: 9%">AI回复</th>
-                    <th style="width: 10%">自动确认发货</th>
-                    <th style="width: 28%">操作</th>
+                    <th style="width: 10%">备注</th>
+                    <th style="width: 15%">Cookie值</th>
+                    <th style="width: 7%">关键词</th>
+                    <th style="width: 7%">状态</th>
+                    <th style="width: 8%">默认回复</th>
+                    <th style="width: 8%">AI回复</th>
+                    <th style="width: 9%">自动确认发货</th>
+                    <th style="width: 26%">操作</th>
                   </tr>
                 </thead>
                 <tbody></tbody>
@@ -356,19 +367,20 @@
                     <th style="width: 5%">
                       <input type="checkbox" id="selectAllItems" onchange="toggleSelectAll(this)">
                     </th>
-                    <th style="width: 12%">账号ID</th>
-                    <th style="width: 12%">商品ID</th>
-                    <th style="width: 15%">商品标题</th>
-                    <th style="width: 18%">商品详情</th>
-                    <th style="width: 8%">多规格</th>
-                    <th style="width: 10%">确认收货发货</th>
-                    <th style="width: 10%">更新时间</th>
+                    <th style="width: 10%">账号ID</th>
+                    <th style="width: 10%">商品ID</th>
+                    <th style="width: 13%">商品标题</th>
+                    <th style="width: 14%">商品详情</th>
+                    <th style="width: 7%">多规格</th>
+                    <th style="width: 9%">确认收货发货</th>
+                    <th style="width: 13%">已配置发货规则</th>
+                    <th style="width: 9%">更新时间</th>
                     <th style="width: 10%">操作</th>
                   </tr>
                 </thead>
                 <tbody id="itemsTableBody">
                   <tr>
-                    <td colspan="7" class="text-center text-muted">加载中...</td>
+                    <td colspan="10" class="text-center text-muted">加载中...</td>
                   </tr>
                 </tbody>
               </table>
@@ -1726,9 +1738,14 @@
         <div class="modal-body">
           <form id="addDeliveryRuleForm">
             <div class="mb-3">
+              <label class="form-label">商品ID <span class="text-muted small">(推荐，精确匹配)</span></label>
+              <input type="text" class="form-control" id="productItemId" placeholder="例如：912345678901">
+              <small class="form-text text-muted">填了商品ID后，仅对该商品生效，不会被关键字误匹配（推荐使用）</small>
+            </div>
+            <div class="mb-3">
               <label class="form-label">商品关键字 <span class="text-danger">*</span></label>
               <input type="text" class="form-control" id="productKeyword" placeholder="例如：游戏点卡、会员卡等" required>
-              <small class="form-text text-muted">当商品标题包含此关键字时触发自动发货</small>
+              <small class="form-text text-muted">未填商品ID时生效：当商品标题包含此关键字时触发</small>
             </div>
             <div class="mb-3">
               <label class="form-label">匹配卡券 <span class="text-danger">*</span></label>
@@ -1778,9 +1795,14 @@
           <form id="editDeliveryRuleForm">
             <input type="hidden" id="editRuleId">
             <div class="mb-3">
+              <label class="form-label">商品ID <span class="text-muted small">(推荐，精确匹配)</span></label>
+              <input type="text" class="form-control" id="editProductItemId" placeholder="例如：912345678901">
+              <small class="form-text text-muted">填了商品ID后，仅对该商品生效，不会被关键字误匹配</small>
+            </div>
+            <div class="mb-3">
               <label class="form-label">商品关键字 <span class="text-danger">*</span></label>
               <input type="text" class="form-control" id="editProductKeyword" required>
-              <small class="form-text text-muted">当商品标题包含此关键字时触发自动发货</small>
+              <small class="form-text text-muted">未填商品ID时生效：当商品标题包含此关键字时触发</small>
             </div>
             <div class="mb-3">
               <label class="form-label">匹配卡券 <span class="text-danger">*</span></label>
@@ -2241,6 +2263,40 @@
           <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
           <button type="button" class="btn btn-primary" onclick="addImageKeyword()">
             <i class="bi bi-plus-lg me-1"></i>添加图片关键词
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 编辑账号备注模态框 -->
+  <div class="modal fade" id="cookieAliasEditModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">
+            <i class="bi bi-tag me-2"></i>设置备注
+          </h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-2">
+            <label class="form-label">账号ID</label>
+            <input type="text" class="form-control" id="aliasEditCookieId" readonly>
+          </div>
+          <div class="mb-2">
+            <label class="form-label">备注 <small class="text-muted">(同一用户下唯一，最多 32 字符；留空表示清除)</small></label>
+            <input type="text" class="form-control" id="aliasEditInput" maxlength="32" placeholder="如：主号、店铺A">
+          </div>
+          <div class="form-text" id="aliasEditHint"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-danger me-auto" id="aliasEditClearBtn">
+            <i class="bi bi-x-circle me-1"></i>清除备注
+          </button>
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+          <button type="button" class="btn btn-primary" id="aliasEditSaveBtn">
+            <i class="bi bi-check-circle me-1"></i>保存
           </button>
         </div>
       </div>

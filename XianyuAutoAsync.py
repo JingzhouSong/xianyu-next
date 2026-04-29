@@ -54,6 +54,34 @@ class XianyuLive:
             except:
                 return "未知错误"
 
+    def _extract_captcha_url(self, res_json) -> str:
+        """从闲鱼接口响应中提取风控验证码挑战 URL；不是风控则返回空串。
+
+        触发条件（任一）：
+        - ret 包含 FAIL_SYS_USER_VALIDATE 或 RGV587_ERROR
+        - data.url 中包含 punish 或 action=captcha
+        """
+        try:
+            if not isinstance(res_json, dict):
+                return ''
+            ret_value = res_json.get('ret', []) or []
+            ret_blob = ' '.join(ret_value) if isinstance(ret_value, list) else str(ret_value)
+            data = res_json.get('data') or {}
+            url = ''
+            if isinstance(data, dict):
+                url = data.get('url') or ''
+            is_risk = (
+                'FAIL_SYS_USER_VALIDATE' in ret_blob
+                or 'RGV587_ERROR' in ret_blob
+                or ('punish' in url)
+                or ('action=captcha' in url)
+            )
+            if is_risk:
+                return url
+            return ''
+        except Exception:
+            return ''
+
     def __init__(self, cookies_str=None, cookie_id: str = "default", user_id: int = None):
         """初始化闲鱼直播类"""
         logger.info(f"【{cookie_id}】开始初始化XianyuLive...")
@@ -317,9 +345,36 @@ class XianyuLive:
 
 
 
+    # 风控冷却时间（秒）：检测到风控后，未清除标记前的此段时间内不再调用 token 刷新接口
+    RISK_COOLDOWN_SECONDS = 600
+
     async def refresh_token(self):
         """刷新token"""
         try:
+            # 风控冷却检查：若该账号最近触发过风控且仍在冷却期内，直接返回，避免持续刷接口加重风控
+            try:
+                from db_manager import db_manager
+                risk = db_manager.get_cookie_risk_status(self.cookie_id)
+                if risk:
+                    detected_at_str = risk.get('detected_at') or ''
+                    detected_ts = 0
+                    try:
+                        detected_ts = time.mktime(time.strptime(detected_at_str, '%Y-%m-%d %H:%M:%S'))
+                    except Exception:
+                        detected_ts = 0
+                    age = time.time() - detected_ts if detected_ts else 10 ** 9
+                    if age < self.RISK_COOLDOWN_SECONDS:
+                        remain = int(self.RISK_COOLDOWN_SECONDS - age)
+                        logger.warning(
+                            f"【{self.cookie_id}】账号处于风控冷却中，跳过 token 刷新（剩余 {remain}s，"
+                            f"或在前端点『标记已完成』手动清除）"
+                        )
+                        return None
+                    else:
+                        logger.info(f"【{self.cookie_id}】风控冷却已过期，尝试重新刷新 token...")
+            except Exception as _e:
+                logger.debug(f"风控冷却检查异常: {_e}")
+
             logger.info(f"【{self.cookie_id}】开始刷新token...")
             params = {
                 'jsv': '2.7.2',
@@ -386,8 +441,41 @@ class XianyuLive:
                                 self.current_token = new_token
                                 self.last_token_refresh_time = time.time()
                                 logger.info(f"【{self.cookie_id}】Token刷新成功")
+                                # 成功后清除风控标记
+                                try:
+                                    from db_manager import db_manager
+                                    if db_manager.get_cookie_risk_status(self.cookie_id):
+                                        db_manager.clear_cookie_risk_status(self.cookie_id)
+                                        logger.info(f"【{self.cookie_id}】风控状态已自动清除")
+                                except Exception as _e:
+                                    logger.debug(f"清除风控状态异常: {_e}")
                                 return new_token
-                            
+
+                    # 识别风控/验证码挑战
+                    captcha_url = self._extract_captcha_url(res_json)
+                    if captcha_url:
+                        ret_text = ' | '.join(ret_value) if isinstance(ret_value, list) else str(ret_value)
+                        logger.error(f"【{self.cookie_id}】Token刷新失败：触发风控验证码挑战: {ret_text}")
+                        try:
+                            from db_manager import db_manager
+                            db_manager.set_cookie_risk_status(self.cookie_id, captcha_url, ret_text)
+                        except Exception as _e:
+                            logger.debug(f"保存风控状态异常: {_e}")
+                        # 发送带操作指引的特殊通知（直接打开 punish 接口会得到 /undefined 错误页，需引导用户走正常网页流程）
+                        await self.send_token_refresh_notification(
+                            (
+                                f"账号被风控，需要手动完成滑块验证：\n"
+                                f"1) 在浏览器打开 https://www.goofish.com/ 并登录该账号；\n"
+                                f"2) 进入私信或商品页，按提示完成滑块；\n"
+                                f"3) 重新导出最新 Cookie 覆盖该账号；\n"
+                                f"4) 在管理后台点击\"标记已完成\"清除风控标记。\n"
+                                f"（接口返回的原始链接是阿里风控内部接口，不能直接在浏览器访问）\n"
+                                f"原始错误: {ret_text}"
+                            ),
+                            "token_refresh_captcha"
+                        )
+                        return None
+
                     logger.error(f"【{self.cookie_id}】Token刷新失败: {res_json}")
                     # 发送Token刷新失败通知
                     await self.send_token_refresh_notification(f"Token刷新失败: {res_json}", "token_refresh_failed")
@@ -1855,26 +1943,36 @@ class XianyuLive:
                 except Exception as e:
                     logger.error(f"获取订单规格信息失败: {self._safe_str(e)}，将使用兜底匹配")
 
-            # 智能匹配发货规则：优先精确匹配，然后兜底匹配
+            # 智能匹配发货规则：优先按商品ID精确匹配 -> 多规格关键词 -> 普通关键词兜底
             delivery_rules = []
 
-            # 第一步：如果有规格信息，尝试精确匹配多规格发货规则
-            if spec_name and spec_value:
-                logger.info(f"尝试精确匹配多规格发货规则: {search_text[:50]}... [{spec_name}:{spec_value}]")
+            # 第一步：按商品ID精确匹配（最可靠，避免标题模糊匹配带来的误发货）
+            if item_id:
+                logger.info(f"尝试按商品ID精确匹配发货规则: item_id={item_id}"
+                            + (f" [{spec_name}:{spec_value}]" if spec_name and spec_value else ""))
+                delivery_rules = db_manager.get_delivery_rules_by_item_id(item_id, spec_name, spec_value)
+                if delivery_rules:
+                    logger.info(f"✅ 按商品ID精确命中发货规则: {len(delivery_rules)}个")
+                else:
+                    logger.info(f"❌ 未找到按商品ID绑定的发货规则，回退到关键词匹配")
+
+            # 第二步：如果有规格信息，尝试精确匹配多规格关键词发货规则
+            if not delivery_rules and spec_name and spec_value:
+                logger.info(f"尝试关键词+多规格匹配发货规则: {search_text[:50]}... [{spec_name}:{spec_value}]")
                 delivery_rules = db_manager.get_delivery_rules_by_keyword_and_spec(search_text, spec_name, spec_value)
 
                 if delivery_rules:
-                    logger.info(f"✅ 找到精确匹配的多规格发货规则: {len(delivery_rules)}个")
+                    logger.info(f"✅ 找到关键词+多规格匹配的发货规则: {len(delivery_rules)}个")
                 else:
-                    logger.info(f"❌ 未找到精确匹配的多规格发货规则")
+                    logger.info(f"❌ 未找到关键词+多规格匹配的发货规则")
 
-            # 第二步：如果精确匹配失败，尝试兜底匹配（普通发货规则）
+            # 第三步：兜底匹配（普通关键词发货规则）
             if not delivery_rules:
-                logger.info(f"尝试兜底匹配普通发货规则: {search_text[:50]}...")
+                logger.info(f"尝试兜底关键词匹配发货规则: {search_text[:50]}...")
                 delivery_rules = db_manager.get_delivery_rules_by_keyword(search_text)
 
                 if delivery_rules:
-                    logger.info(f"✅ 找到兜底匹配的普通发货规则: {len(delivery_rules)}个")
+                    logger.info(f"✅ 找到兜底关键词匹配的发货规则: {len(delivery_rules)}个")
                 else:
                     logger.info(f"❌ 未找到任何匹配的发货规则")
 
@@ -2125,6 +2223,11 @@ class XianyuLive:
 
     async def token_refresh_loop(self):
         """Token刷新循环"""
+        # 给本进程的 token 刷新阈值加 ±10% 随机抖动，避免多账号/多次重启后形成规律性请求被风控盯上
+        import random as _random
+        jitter_ratio = 1.0 + _random.uniform(-0.1, 0.1)
+        jittered_interval = max(60, int(self.token_refresh_interval * jitter_ratio))
+        logger.info(f"【{self.cookie_id}】Token 刷新间隔（含抖动）: {jittered_interval}s（基准 {self.token_refresh_interval}s）")
         while True:
             try:
                 # 检查账号是否启用
@@ -2134,7 +2237,7 @@ class XianyuLive:
                     break
 
                 current_time = time.time()
-                if current_time - self.last_token_refresh_time >= self.token_refresh_interval:
+                if current_time - self.last_token_refresh_time >= jittered_interval:
                     logger.info("Token即将过期，准备刷新...")
                     new_token = await self.refresh_token()
                     if new_token:

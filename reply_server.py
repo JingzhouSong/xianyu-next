@@ -33,6 +33,15 @@ DEFAULT_ADMIN_PASSWORD = "admin123"  # 系统初始化时的默认密码
 SESSION_TOKENS = {}  # 存储会话token: {token: {'user_id': int, 'username': str, 'timestamp': float}}
 TOKEN_EXPIRE_TIME = 24 * 60 * 60  # token过期时间：24小时
 
+# 启动时从数据库恢复登录态（重启不掉线）
+try:
+    db_manager.cleanup_expired_sessions(TOKEN_EXPIRE_TIME)
+    SESSION_TOKENS.update(db_manager.load_all_sessions())
+    if SESSION_TOKENS:
+        logger.info(f"已从数据库恢复 {len(SESSION_TOKENS)} 个登录会话")
+except Exception as _e:
+    logger.error(f"恢复登录会话失败: {_e}")
+
 # HTTP Bearer认证
 security = HTTPBearer(auto_error=False)
 
@@ -94,9 +103,11 @@ class ChangePasswordRequest(BaseModel):
 
 class RegisterRequest(BaseModel):
     username: str
-    email: str
     password: str
-    verification_code: str
+    confirm_password: Optional[str] = None
+    # 兼容旧前端字段，后端忽略
+    email: Optional[str] = None
+    verification_code: Optional[str] = None
 
 
 class RegisterResponse(BaseModel):
@@ -141,6 +152,23 @@ def generate_token() -> str:
     return secrets.token_urlsafe(32)
 
 
+def get_client_ip(request) -> str:
+    """获取客户端真实 IP
+
+    优先级：X-Forwarded-For（取第一个）→ X-Real-IP → request.client.host
+    """
+    try:
+        xff = request.headers.get('X-Forwarded-For') or request.headers.get('x-forwarded-for')
+        if xff:
+            return xff.split(',')[0].strip()
+        xri = request.headers.get('X-Real-IP') or request.headers.get('x-real-ip')
+        if xri:
+            return xri.strip()
+        return request.client.host if request.client else ''
+    except Exception:
+        return ''
+
+
 def verify_token(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Optional[Dict[str, Any]]:
     """验证token并返回用户信息"""
     if not credentials:
@@ -155,7 +183,26 @@ def verify_token(credentials: Optional[HTTPAuthorizationCredentials] = Depends(s
     # 检查token是否过期
     if time.time() - token_data['timestamp'] > TOKEN_EXPIRE_TIME:
         del SESSION_TOKENS[token]
+        try:
+            db_manager.delete_session(token)
+        except Exception:
+            pass
         return None
+
+    # 非管理员还要检查账号是否到期
+    if token_data.get('username') != ADMIN_USERNAME:
+        try:
+            expiry = db_manager.get_user_expiry(token_data['user_id'])
+            if expiry is not None and time.time() >= expiry:
+                # 到期则吊销当前 token
+                del SESSION_TOKENS[token]
+                try:
+                    db_manager.delete_session(token)
+                except Exception:
+                    pass
+                return None
+        except Exception as _e:
+            logger.warning(f"检查用户到期失败: {_e}")
 
     return token_data
 
@@ -475,11 +522,16 @@ async def login(request: LoginRequest):
             if user:
                 # 生成token
                 token = generate_token()
+                _now = time.time()
                 SESSION_TOKENS[token] = {
                     'user_id': user['id'],
                     'username': user['username'],
-                    'timestamp': time.time()
+                    'timestamp': _now
                 }
+                try:
+                    db_manager.save_session(token, user['id'], user['username'], _now)
+                except Exception as _e:
+                    logger.warning(f"持久化会话失败: {_e}")
 
                 # 区分管理员和普通用户的日志
                 if user['username'] == ADMIN_USERNAME:
@@ -508,11 +560,16 @@ async def login(request: LoginRequest):
         if user and db_manager.verify_user_password(user['username'], request.password):
             # 生成token
             token = generate_token()
+            _now = time.time()
             SESSION_TOKENS[token] = {
                 'user_id': user['id'],
                 'username': user['username'],
-                'timestamp': time.time()
+                'timestamp': _now
             }
+            try:
+                db_manager.save_session(token, user['id'], user['username'], _now)
+            except Exception as _e:
+                logger.warning(f"持久化会话失败: {_e}")
 
             logger.info(f"【{user['username']}#{user['id']}】邮箱登录成功")
 
@@ -552,11 +609,16 @@ async def login(request: LoginRequest):
 
         # 生成token
         token = generate_token()
+        _now = time.time()
         SESSION_TOKENS[token] = {
             'user_id': user['id'],
             'username': user['username'],
-            'timestamp': time.time()
+            'timestamp': _now
         }
+        try:
+            db_manager.save_session(token, user['id'], user['username'], _now)
+        except Exception as _e:
+            logger.warning(f"持久化会话失败: {_e}")
 
         logger.info(f"【{user['username']}#{user['id']}】验证码登录成功")
 
@@ -591,6 +653,11 @@ async def verify(user_info: Optional[Dict[str, Any]] = Depends(verify_token)):
 async def logout(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)):
     if credentials and credentials.credentials in SESSION_TOKENS:
         del SESSION_TOKENS[credentials.credentials]
+    if credentials:
+        try:
+            db_manager.delete_session(credentials.credentials)
+        except Exception:
+            pass
     return {"message": "已登出"}
 
 
@@ -754,60 +821,56 @@ async def send_verification_code(request: SendCodeRequest):
         )
 
 
-# 用户注册接口
+# 用户注册接口（仅用户名+密码；记录真实 IP；同 IP 首登赠 1 天体验）
+from fastapi import Request as _FAReq
+
 @app.post('/register')
-async def register(request: RegisterRequest):
+async def register(request: RegisterRequest, http_request: _FAReq):
     from db_manager import db_manager
 
+    username = (request.username or '').strip()
+    password = request.password or ''
+    confirm = request.confirm_password
+
+    if not username or not password:
+        return RegisterResponse(success=False, message="请填写用户名和密码")
+    if len(username) < 3 or len(username) > 32:
+        return RegisterResponse(success=False, message="用户名长度需为 3-32 位")
+    if len(password) < 6:
+        return RegisterResponse(success=False, message="密码长度至少 6 位")
+    if confirm is not None and confirm != password:
+        return RegisterResponse(success=False, message="两次输入的密码不一致")
+
+    client_ip = get_client_ip(http_request)
+    logger.info(f"【{username}】尝试注册，IP={client_ip or '?'}")
+
     try:
-        logger.info(f"【{request.username}】尝试注册，邮箱: {request.email}")
+        if db_manager.get_user_by_username(username):
+            return RegisterResponse(success=False, message="用户名已存在")
 
-        # 验证邮箱验证码
-        if not db_manager.verify_email_code(request.email, request.verification_code):
-            logger.warning(f"【{request.username}】注册失败: 验证码错误或已过期")
-            return RegisterResponse(
-                success=False,
-                message="验证码错误或已过期"
-            )
-
-        # 检查用户名是否已存在
-        existing_user = db_manager.get_user_by_username(request.username)
-        if existing_user:
-            logger.warning(f"【{request.username}】注册失败: 用户名已存在")
-            return RegisterResponse(
-                success=False,
-                message="用户名已存在"
-            )
-
-        # 检查邮箱是否已注册
-        existing_email = db_manager.get_user_by_email(request.email)
-        if existing_email:
-            logger.warning(f"【{request.username}】注册失败: 邮箱已被注册")
-            return RegisterResponse(
-                success=False,
-                message="该邮箱已被注册"
-            )
-
-        # 创建用户
-        if db_manager.create_user(request.username, request.email, request.password):
-            logger.info(f"【{request.username}】注册成功")
-            return RegisterResponse(
-                success=True,
-                message="注册成功，请登录"
-            )
+        # 同 IP 首次注册赠送 1 天体验，否则到期时间为现在（需付费/管理员发放）
+        ip_existing = db_manager.count_users_by_register_ip(client_ip) if client_ip else 0
+        now = time.time()
+        if client_ip and ip_existing == 0:
+            expires_at = now + 86400  # 1 天体验
+            trial_msg = "，已赠送 1 天体验权益"
         else:
-            logger.error(f"【{request.username}】注册失败: 数据库操作失败")
-            return RegisterResponse(
-                success=False,
-                message="注册失败，请稍后重试"
-            )
+            expires_at = now  # 默认到期，需管理员发放权益
+            trial_msg = "，请联系管理员开通权益后使用"
 
+        # email 字段 NOT NULL/UNIQUE，用 username 合成占位以保证唯一
+        synth_email = f"{username}@local.invalid"
+        ok = db_manager.create_user(username, synth_email, password,
+                                    register_ip=client_ip or None,
+                                    expires_at=expires_at)
+        if not ok:
+            return RegisterResponse(success=False, message="注册失败，请稍后重试")
+
+        logger.info(f"【{username}】注册成功，IP={client_ip}，同 IP 已有 {ip_existing} 个用户{trial_msg}")
+        return RegisterResponse(success=True, message=f"注册成功{trial_msg}")
     except Exception as e:
-        logger.error(f"【{request.username}】注册异常: {e}")
-        return RegisterResponse(
-            success=False,
-            message="注册失败，请稍后重试"
-        )
+        logger.error(f"【{username}】注册异常: {e}")
+        return RegisterResponse(success=False, message="注册失败，请稍后重试")
 
 
 @app.post("/xianyu/reply", response_model=ResponseModel)
@@ -908,11 +971,15 @@ def get_cookies_details(current_user: Dict[str, Any] = Depends(get_current_user)
     for cookie_id, cookie_value in user_cookies.items():
         cookie_enabled = cookie_manager.manager.get_cookie_status(cookie_id)
         auto_confirm = db_manager.get_auto_confirm(cookie_id)
+        risk_status = db_manager.get_cookie_risk_status(cookie_id)
+        alias = db_manager.get_cookie_alias(cookie_id)
         result.append({
             'id': cookie_id,
             'value': cookie_value,
             'enabled': cookie_enabled,
-            'auto_confirm': auto_confirm
+            'auto_confirm': auto_confirm,
+            'risk_status': risk_status,  # None 表示无风控；否则 {captcha_url, error_message, detected_at}
+            'alias': alias or '',  # 用户自定义标识，按用户范围内唯一
         })
     return result
 
@@ -1087,6 +1154,35 @@ async def process_qr_login_cookies(cookies: str, unb: str, current_user: Dict[st
     except Exception as e:
         log_with_user('error', f"处理扫码登录Cookie失败: {str(e)}", current_user)
         raise e
+
+
+class CookieAliasIn(BaseModel):
+    alias: Optional[str] = ''
+
+
+@app.put('/cookies/{cid}/alias')
+def update_cookie_alias(cid: str, payload: CookieAliasIn, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """设置账号自定义标识（用户范围内唯一，留空清除）"""
+    from db_manager import db_manager
+    user_id = current_user['user_id']
+    ok, msg = db_manager.set_cookie_alias(cid, payload.alias, user_id)
+    if not ok:
+        # 归属错误用 403，其它（重复、长度等）用 400
+        status_code = 403 if msg == "无权限操作该账号" else (404 if msg == "账号不存在" else 400)
+        raise HTTPException(status_code=status_code, detail=msg)
+    return {'success': True, 'alias': (payload.alias or '').strip()}
+
+
+@app.post('/cookies/{cid}/clear-risk')
+def clear_cookie_risk(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """清除账号的风控/验证码标记（用户在浏览器手动过验证后调用）"""
+    from db_manager import db_manager
+    user_id = current_user['user_id']
+    user_cookies = db_manager.get_all_cookies(user_id)
+    if cid not in user_cookies:
+        raise HTTPException(status_code=403, detail="无权限操作该Cookie")
+    ok = db_manager.clear_cookie_risk_status(cid)
+    return {'success': ok}
 
 
 @app.put('/cookies/{cid}/status')
@@ -2259,7 +2355,8 @@ def create_delivery_rule(rule_data: dict, current_user: Dict[str, Any] = Depends
             delivery_count=rule_data.get('delivery_count', 1),
             enabled=rule_data.get('enabled', True),
             description=rule_data.get('description'),
-            user_id=user_id
+            user_id=user_id,
+            item_id=(rule_data.get('item_id') or None)
         )
         return {"id": rule_id, "message": "发货规则创建成功"}
     except Exception as e:
@@ -2294,7 +2391,9 @@ def update_delivery_rule(rule_id: int, rule_data: dict, current_user: Dict[str, 
             delivery_count=rule_data.get('delivery_count', 1),
             enabled=rule_data.get('enabled', True),
             description=rule_data.get('description'),
-            user_id=user_id
+            user_id=user_id,
+            item_id=(rule_data.get('item_id') or None),
+            item_id_set=('item_id' in rule_data)
         )
         if success:
             return {"message": "发货规则更新成功"}
@@ -3037,6 +3136,97 @@ def get_all_users(admin_user: Dict[str, Any] = Depends(require_admin)):
     except Exception as e:
         log_with_user('error', f"获取用户信息失败: {str(e)}", admin_user)
         raise HTTPException(status_code=500, detail=str(e))
+
+# ---- 权益价格管理（管理员专用） ----
+@app.get('/admin/entitlement-prices')
+def list_entitlement_prices(admin_user: Dict[str, Any] = Depends(require_admin)):
+    """获取所有权益档位"""
+    try:
+        return {"items": db_manager.get_entitlement_prices()}
+    except Exception as e:
+        log_with_user('error', f"获取权益价格失败: {e}", admin_user)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class EntitlementPriceRequest(BaseModel):
+    key: str
+    name: str
+    days: int
+    price: float
+    enabled: bool = True
+    sort_order: int = 0
+
+
+@app.post('/admin/entitlement-prices')
+def upsert_entitlement_price(req: EntitlementPriceRequest,
+                              admin_user: Dict[str, Any] = Depends(require_admin)):
+    """新增或修改一个权益档位"""
+    if not req.key or req.days <= 0 or req.price < 0:
+        raise HTTPException(status_code=400, detail="key/days/price 参数无效")
+    ok = db_manager.upsert_entitlement_price(req.key.strip(), req.name.strip(),
+                                              req.days, req.price, req.enabled, req.sort_order)
+    if not ok:
+        raise HTTPException(status_code=500, detail="保存失败")
+    log_with_user('info', f"保存权益价格: {req.key} {req.name} days={req.days} price={req.price}", admin_user)
+    return {"success": True}
+
+
+@app.delete('/admin/entitlement-prices/{key}')
+def delete_entitlement_price(key: str, admin_user: Dict[str, Any] = Depends(require_admin)):
+    ok = db_manager.delete_entitlement_price(key)
+    if not ok:
+        raise HTTPException(status_code=404, detail="该权益不存在")
+    log_with_user('info', f"删除权益价格: {key}", admin_user)
+    return {"success": True}
+
+
+class GrantRequest(BaseModel):
+    key: Optional[str] = None         # 选择一个现有档位（如 weekly/monthly/yearly）
+    days: Optional[int] = None        # 或直接指定天数，key 与 days 二选一
+
+
+@app.post('/admin/users/{user_id}/grant')
+def grant_entitlement(user_id: int, req: GrantRequest,
+                      admin_user: Dict[str, Any] = Depends(require_admin)):
+    """给用户发放权益（续期）"""
+    target = db_manager.get_user_by_id(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if target['username'] == ADMIN_USERNAME:
+        raise HTTPException(status_code=400, detail="管理员无需发放权益")
+
+    days = req.days
+    if req.key:
+        item = db_manager.get_entitlement_price(req.key)
+        if not item:
+            raise HTTPException(status_code=404, detail="权益档位不存在")
+        days = int(item['days'])
+    if not days or days <= 0:
+        raise HTTPException(status_code=400, detail="请提供有效的 days 或 key")
+
+    new_expiry = db_manager.extend_user_expiry(user_id, days)
+    if new_expiry is None:
+        raise HTTPException(status_code=500, detail="发放失败")
+    log_with_user('info', f"给 user_id={user_id} ({target['username']}) 发放 {days} 天权益", admin_user)
+    return {"success": True, "expires_at": new_expiry, "days_added": days}
+
+
+class ExpiryRequest(BaseModel):
+    expires_at: Optional[float] = None   # None 表示设为永久
+
+
+@app.post('/admin/users/{user_id}/expiry')
+def set_user_expiry(user_id: int, req: ExpiryRequest,
+                    admin_user: Dict[str, Any] = Depends(require_admin)):
+    """直接设置用户到期时间（None=永久）"""
+    target = db_manager.get_user_by_id(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if not db_manager.set_user_expiry(user_id, req.expires_at):
+        raise HTTPException(status_code=500, detail="设置失败")
+    log_with_user('info', f"设置 user_id={user_id} 到期={req.expires_at}", admin_user)
+    return {"success": True}
+
 
 @app.delete('/admin/users/{user_id}')
 def delete_user(user_id: int, admin_user: Dict[str, Any] = Depends(require_admin)):

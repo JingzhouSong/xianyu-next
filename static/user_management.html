@@ -101,6 +101,36 @@
             </div>
         </div>
 
+        <!-- 权益价格配置 -->
+        <div class="card mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="bi bi-tag-fill"></i> 权益价格配置</h5>
+                <button class="btn btn-outline-primary btn-sm" onclick="openPriceEditor()">
+                    <i class="bi bi-plus-lg"></i> 新增档位
+                </button>
+            </div>
+            <div class="card-body p-0">
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead>
+                            <tr>
+                                <th>标识(key)</th>
+                                <th>名称</th>
+                                <th>天数</th>
+                                <th>价格(元)</th>
+                                <th>状态</th>
+                                <th>排序</th>
+                                <th style="width: 160px">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="pricesTbody">
+                            <tr><td colspan="7" class="text-center text-muted py-3">加载中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
         <!-- 用户列表 -->
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
@@ -155,6 +185,120 @@
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
                     <button type="button" class="btn btn-danger-custom" onclick="confirmDeleteUser()">
                         <i class="bi bi-trash"></i> 确认删除
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 发放/续期权益模态框 -->
+    <div class="modal fade" id="grantModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="bi bi-gift"></i> 发放权益</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="mb-3">
+                        为用户 <strong id="grantUserName"></strong> 发放权益（在当前到期时间基础上累加）
+                    </p>
+                    <div class="mb-3">
+                        <label class="form-label">选择档位</label>
+                        <select id="grantKeySelect" class="form-select">
+                            <option value="">— 选择已配置档位 —</option>
+                        </select>
+                    </div>
+                    <div class="text-center text-muted my-2">— 或 —</div>
+                    <div class="mb-3">
+                        <label class="form-label">自定义天数</label>
+                        <input type="number" class="form-control" id="grantDays" min="1" placeholder="例如 7">
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-success" onclick="submitGrant()">
+                        <i class="bi bi-check2"></i> 确认发放
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 直接修改到期时间模态框 -->
+    <div class="modal fade" id="expiryModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="bi bi-pencil"></i> 修改到期时间</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="mb-3">用户 <strong id="expiryUserName"></strong></p>
+                    <div class="mb-3">
+                        <label class="form-label">到期时间</label>
+                        <input type="datetime-local" class="form-control" id="expiryDateTime">
+                        <div class="form-text">留空表示永久（不到期）</div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-warning me-auto" onclick="submitExpiry(true)">
+                        <i class="bi bi-infinity"></i> 设为永久
+                    </button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary" onclick="submitExpiry(false)">
+                        <i class="bi bi-check2"></i> 保存
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 权益价格编辑模态框 -->
+    <div class="modal fade" id="priceModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="bi bi-tag-fill"></i> <span id="priceModalTitle">权益档位</span></h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label class="form-label">标识（key，唯一，英文）</label>
+                        <input type="text" class="form-control" id="priceKey" placeholder="例如 weekly / monthly / quarterly">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label">名称</label>
+                        <input type="text" class="form-control" id="priceName" placeholder="例如 周卡">
+                    </div>
+                    <div class="row">
+                        <div class="col-6 mb-3">
+                            <label class="form-label">天数</label>
+                            <input type="number" class="form-control" id="priceDays" min="1">
+                        </div>
+                        <div class="col-6 mb-3">
+                            <label class="form-label">价格（元）</label>
+                            <input type="number" step="0.01" class="form-control" id="pricePrice" min="0">
+                        </div>
+                    </div>
+                    <div class="row">
+                        <div class="col-6 mb-3">
+                            <label class="form-label">排序</label>
+                            <input type="number" class="form-control" id="priceSort" value="0">
+                        </div>
+                        <div class="col-6 mb-3">
+                            <label class="form-label">状态</label>
+                            <select id="priceEnabled" class="form-select">
+                                <option value="1">启用</option>
+                                <option value="0">禁用</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary" onclick="submitPrice()">
+                        <i class="bi bi-check2"></i> 保存
                     </button>
                 </div>
             </div>
@@ -291,6 +435,22 @@
             const badgeClass = isAdmin ? 'bg-danger' : 'bg-primary';
             const badgeText = isAdmin ? '管理员' : '普通用户';
             
+            // 计算到期状态
+            const now = Date.now() / 1000;
+            const exp = user.expires_at;
+            let expiryHtml;
+            if (isAdmin) {
+                expiryHtml = `<span class="badge bg-danger"><i class="bi bi-infinity"></i> 永久（管理员）</span>`;
+            } else if (exp == null) {
+                expiryHtml = `<span class="badge bg-secondary">未设置（永久）</span>`;
+            } else if (exp <= now) {
+                expiryHtml = `<span class="badge bg-warning text-dark">已到期 · ${formatDate(new Date(exp * 1000))}</span>`;
+            } else {
+                const daysLeft = Math.ceil((exp - now) / 86400);
+                const cls = daysLeft <= 3 ? 'bg-warning text-dark' : 'bg-success';
+                expiryHtml = `<span class="badge ${cls}"><i class="bi bi-clock"></i> 剩 ${daysLeft} 天 · ${formatDate(new Date(exp * 1000))}</span>`;
+            }
+
             col.innerHTML = `
                 <div class="card user-card h-100">
                     <div class="card-body">
@@ -300,8 +460,11 @@
                             </h6>
                             <span class="badge ${badgeClass}">${badgeText}</span>
                         </div>
+                        <p class="card-text text-muted small mb-1">
+                            <i class="bi bi-envelope"></i> ${user.email || '-'}
+                        </p>
                         <p class="card-text text-muted small mb-2">
-                            <i class="bi bi-envelope"></i> ${user.email}
+                            <i class="bi bi-globe"></i> 注册IP：<code>${user.register_ip || '-'}</code>
                         </p>
                         <div class="row text-center mb-3">
                             <div class="col">
@@ -313,11 +476,21 @@
                                 <div class="fw-bold">${user.card_count || 0}</div>
                             </div>
                         </div>
-                        <div class="text-muted small mb-2">
+                        <div class="text-muted small mb-1">
                             <i class="bi bi-calendar"></i> 注册时间：${formatDate(user.created_at)}
                         </div>
+                        <div class="mb-3">
+                            <small class="text-muted d-block mb-1"><i class="bi bi-hourglass-split"></i> 权益到期</small>
+                            ${expiryHtml}
+                        </div>
                         ${!isAdmin ? `
-                        <div class="d-grid">
+                        <div class="d-grid gap-2">
+                            <button class="btn btn-success btn-sm" onclick='openGrantModal(${JSON.stringify(user)})'>
+                                <i class="bi bi-gift"></i> 发放/续期权益
+                            </button>
+                            <button class="btn btn-outline-secondary btn-sm" onclick='openExpiryEditor(${JSON.stringify(user)})'>
+                                <i class="bi bi-pencil"></i> 直接修改到期
+                            </button>
                             <button class="btn btn-danger-custom btn-sm" onclick="deleteUser(${user.id}, '${user.username}')">
                                 <i class="bi bi-trash"></i> 删除用户
                             </button>
@@ -387,6 +560,194 @@
             localStorage.removeItem('auth_token');
             window.location.href = '/login.html';
         }
+
+        // ==================== 权益价格 + 发放/到期 ====================
+        let pricesCache = [];
+        let grantModal = null, expiryModal = null, priceModal = null;
+        let grantTargetUser = null, expiryTargetUser = null, priceEditingKey = null;
+
+        function authHeaders() {
+            const token = localStorage.getItem('auth_token');
+            return { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' };
+        }
+
+        async function loadPrices() {
+            const tbody = document.getElementById('pricesTbody');
+            try {
+                const resp = await fetch('/admin/entitlement-prices', { headers: authHeaders() });
+                const data = await resp.json();
+                pricesCache = data.items || [];
+                renderPrices();
+                refreshGrantSelect();
+            } catch (err) {
+                console.error('加载权益价格失败:', err);
+                tbody.innerHTML = '<tr><td colspan="7" class="text-center text-danger py-3">加载失败</td></tr>';
+            }
+        }
+
+        function renderPrices() {
+            const tbody = document.getElementById('pricesTbody');
+            if (!pricesCache.length) {
+                tbody.innerHTML = '<tr><td colspan="7" class="text-center text-muted py-3">暂无档位，点击右上角"新增档位"</td></tr>';
+                return;
+            }
+            tbody.innerHTML = pricesCache.map(p => `
+                <tr>
+                    <td><code>${p.key}</code></td>
+                    <td>${p.name}</td>
+                    <td>${p.days} 天</td>
+                    <td>¥ ${Number(p.price).toFixed(2)}</td>
+                    <td>${p.enabled ? '<span class="badge bg-success">启用</span>' : '<span class="badge bg-secondary">禁用</span>'}</td>
+                    <td>${p.sort_order}</td>
+                    <td>
+                        <button class="btn btn-sm btn-outline-primary" onclick='openPriceEditor(${JSON.stringify(p)})'>
+                            <i class="bi bi-pencil"></i>
+                        </button>
+                        <button class="btn btn-sm btn-outline-danger" onclick="deletePrice('${p.key}')">
+                            <i class="bi bi-trash"></i>
+                        </button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        function refreshGrantSelect() {
+            const sel = document.getElementById('grantKeySelect');
+            sel.innerHTML = '<option value="">— 选择已配置档位 —</option>' +
+                pricesCache.filter(p => p.enabled).map(p =>
+                    `<option value="${p.key}">${p.name}（${p.days} 天 / ¥${Number(p.price).toFixed(2)}）</option>`
+                ).join('');
+        }
+
+        function openPriceEditor(price) {
+            if (!priceModal) priceModal = new bootstrap.Modal(document.getElementById('priceModal'));
+            const isEdit = !!(price && price.key);
+            priceEditingKey = isEdit ? price.key : null;
+            document.getElementById('priceModalTitle').textContent = isEdit ? '编辑档位' : '新增档位';
+            document.getElementById('priceKey').value = isEdit ? price.key : '';
+            document.getElementById('priceKey').disabled = isEdit;
+            document.getElementById('priceName').value = isEdit ? price.name : '';
+            document.getElementById('priceDays').value = isEdit ? price.days : 7;
+            document.getElementById('pricePrice').value = isEdit ? price.price : 0;
+            document.getElementById('priceSort').value = isEdit ? (price.sort_order || 0) : 99;
+            document.getElementById('priceEnabled').value = isEdit ? (price.enabled ? '1' : '0') : '1';
+            priceModal.show();
+        }
+
+        async function submitPrice() {
+            const key = document.getElementById('priceKey').value.trim();
+            const name = document.getElementById('priceName').value.trim();
+            const days = parseInt(document.getElementById('priceDays').value, 10);
+            const price = parseFloat(document.getElementById('pricePrice').value);
+            const sort_order = parseInt(document.getElementById('priceSort').value || '0', 10);
+            const enabled = document.getElementById('priceEnabled').value === '1';
+            if (!key || !name || !days || days <= 0 || isNaN(price) || price < 0) {
+                alert('请正确填写所有字段'); return;
+            }
+            try {
+                const resp = await fetch('/admin/entitlement-prices', {
+                    method: 'POST', headers: authHeaders(),
+                    body: JSON.stringify({ key, name, days, price, enabled, sort_order })
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || '保存失败');
+                priceModal.hide();
+                loadPrices();
+            } catch (err) {
+                alert('保存失败: ' + err.message);
+            }
+        }
+
+        async function deletePrice(key) {
+            if (!confirm(`确认删除档位 "${key}"？该操作不影响已发放的权益。`)) return;
+            try {
+                const resp = await fetch('/admin/entitlement-prices/' + encodeURIComponent(key), {
+                    method: 'DELETE', headers: authHeaders()
+                });
+                if (!resp.ok) {
+                    const data = await resp.json().catch(() => ({}));
+                    throw new Error(data.detail || '删除失败');
+                }
+                loadPrices();
+            } catch (err) {
+                alert('删除失败: ' + err.message);
+            }
+        }
+
+        // ---- 发放权益 ----
+        function openGrantModal(user) {
+            if (!grantModal) grantModal = new bootstrap.Modal(document.getElementById('grantModal'));
+            grantTargetUser = user;
+            document.getElementById('grantUserName').textContent = user.username;
+            document.getElementById('grantKeySelect').value = '';
+            document.getElementById('grantDays').value = '';
+            grantModal.show();
+        }
+
+        async function submitGrant() {
+            if (!grantTargetUser) return;
+            const key = document.getElementById('grantKeySelect').value;
+            const daysStr = document.getElementById('grantDays').value;
+            const body = {};
+            if (key) body.key = key;
+            else if (daysStr) body.days = parseInt(daysStr, 10);
+            else { alert('请选择档位或填写自定义天数'); return; }
+
+            try {
+                const resp = await fetch(`/admin/users/${grantTargetUser.id}/grant`, {
+                    method: 'POST', headers: authHeaders(), body: JSON.stringify(body)
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || '发放失败');
+                grantModal.hide();
+                alert(`已发放 ${data.days_added} 天，新到期: ${formatDate(new Date(data.expires_at * 1000))}`);
+                loadUsers();
+            } catch (err) {
+                alert('发放失败: ' + err.message);
+            }
+        }
+
+        // ---- 直接修改到期 ----
+        function openExpiryEditor(user) {
+            if (!expiryModal) expiryModal = new bootstrap.Modal(document.getElementById('expiryModal'));
+            expiryTargetUser = user;
+            document.getElementById('expiryUserName').textContent = user.username;
+            const input = document.getElementById('expiryDateTime');
+            if (user.expires_at) {
+                const d = new Date(user.expires_at * 1000);
+                // 转换为本地时间格式 yyyy-MM-ddTHH:mm
+                const pad = n => String(n).padStart(2, '0');
+                input.value = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+            } else {
+                input.value = '';
+            }
+            expiryModal.show();
+        }
+
+        async function submitExpiry(forever) {
+            if (!expiryTargetUser) return;
+            let expires_at = null;
+            if (!forever) {
+                const v = document.getElementById('expiryDateTime').value;
+                if (!v) { alert('请选择到期时间，或点击"设为永久"'); return; }
+                expires_at = new Date(v).getTime() / 1000;
+            }
+            try {
+                const resp = await fetch(`/admin/users/${expiryTargetUser.id}/expiry`, {
+                    method: 'POST', headers: authHeaders(),
+                    body: JSON.stringify({ expires_at })
+                });
+                const data = await resp.json();
+                if (!resp.ok) throw new Error(data.detail || '设置失败');
+                expiryModal.hide();
+                loadUsers();
+            } catch (err) {
+                alert('设置失败: ' + err.message);
+            }
+        }
+
+        // 页面加载时一并加载价格
+        document.addEventListener('DOMContentLoaded', loadPrices);
     </script>
 </body>
 </html>

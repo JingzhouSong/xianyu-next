@@ -4,6 +4,12 @@ const apiBase = location.origin;
 let keywordsData = {};
 let currentCookieId = '';
 let editCookieId = '';
+// 账号 ID -> 备注（alias）映射，供各账号相关页面统一展示
+let cookieAliasMap = {};
+function formatAccountLabel(cookieId, alias) {
+    const a = (alias != null ? alias : cookieAliasMap[cookieId]) || '';
+    return a ? `${cookieId}（${a}）` : `${cookieId}`;
+}
 let authToken = localStorage.getItem('auth_token');
 let dashboardData = {
     accounts: [],
@@ -221,11 +227,17 @@ function updateDashboardAccountsList(accounts) {
         status = '<span class="badge bg-secondary">未配置</span>';
     }
 
+    const aliasText = (account.alias || '').toString();
+    const aliasBadge = aliasText
+        ? `<span class="badge bg-info text-dark ms-2" title="备注"><i class="bi bi-tag-fill me-1"></i>${escapeHtml(aliasText)}</span>`
+        : '';
+
     const row = document.createElement('tr');
     row.className = isEnabled ? '' : 'table-secondary';
     row.innerHTML = `
         <td>
         <strong class="text-primary ${!isEnabled ? 'text-muted' : ''}">${account.id}</strong>
+        ${aliasBadge}
         ${!isEnabled ? '<i class="bi bi-pause-circle-fill text-danger ms-1" title="已禁用"></i>' : ''}
         </td>
         <td>
@@ -367,13 +379,12 @@ async function refreshAccountList() {
             status = ` (${account.keywordCount} 个关键词)`;
         }
 
-        option.textContent = `${icon} ${account.id}${status}`;
+        option.textContent = `${icon} ${formatAccountLabel(account.id, account.alias)}${status}`;
         select.appendChild(option);
         });
 
-        // 如果有禁用的账号，添加分隔线和禁用账号
+        // 如果有禁用账号，添加分隔线
         if (disabledAccounts.length > 0) {
-        // 添加分隔线
         const separatorOption = document.createElement('option');
         separatorOption.disabled = true;
         separatorOption.textContent = `--- 禁用账号 (${disabledAccounts.length} 个) ---`;
@@ -393,7 +404,7 @@ async function refreshAccountList() {
             status = ` (${account.keywordCount} 个关键词) [已禁用]`;
             }
 
-            option.textContent = `${icon} ${account.id}${status}`;
+            option.textContent = `${icon} ${formatAccountLabel(account.id, account.alias)}${status}`;
             option.style.color = '#6b7280';
             option.style.fontStyle = 'italic';
             select.appendChild(option);
@@ -990,10 +1001,14 @@ async function loadCookies() {
 
     const cookieDetails = await fetchJSON(apiBase + '/cookies/details');
 
+    // 同步全局 备注 映射，供其他账号相关页面引用
+    cookieAliasMap = {};
+    (cookieDetails || []).forEach(c => { if (c && c.id) cookieAliasMap[c.id] = c.alias || ''; });
+
     if (cookieDetails.length === 0) {
         tbody.innerHTML = `
         <tr>
-            <td colspan="7" class="text-center py-4 text-muted empty-state">
+            <td colspan="9" class="text-center py-4 text-muted empty-state">
             <i class="bi bi-inbox fs-1 d-block mb-3"></i>
             <h5>暂无账号</h5>
             <p class="mb-0">请添加新的闲鱼账号开始使用</p>
@@ -1076,12 +1091,38 @@ async function loadCookies() {
         // 自动确认发货状态（默认开启）
         const autoConfirm = cookie.auto_confirm === undefined ? true : cookie.auto_confirm;
 
+        // 风控状态徽章
+        const risk = cookie.risk_status;
+        const riskBadge = risk ? `
+            <div class="mt-1">
+              <span class="badge bg-danger" title="${(risk.error_message||'').replace(/"/g,'&quot;')}">
+                <i class="bi bi-exclamation-triangle-fill"></i> 需验证
+              </span>
+              <button class="btn btn-sm btn-warning py-0 px-1 ms-1" onclick="showCaptchaHelp('${cookie.id}')" title="查看如何在浏览器完成滑块验证">
+                <i class="bi bi-shield-check"></i> 如何过验证
+              </button>
+              <button class="btn btn-sm btn-outline-secondary py-0 px-1 ms-1" onclick="clearCookieRisk('${cookie.id}')" title="若你已在浏览器完成验证或已替换最新Cookie，点击此按钮清除标记">
+                <i class="bi bi-check2-circle"></i> 标记已完成
+              </button>
+              <small class="text-muted d-block mt-1">${risk.detected_at || ''}</small>
+            </div>` : '';
+
+        // 备注徽章/编辑
+        const aliasText = (cookie.alias || '').toString();
+        const aliasSafe = aliasText.replace(/'/g, "&#39;").replace(/"/g, '&quot;');
+        const aliasCell = aliasText
+            ? `<span class="badge bg-info text-dark me-1" title="备注"><i class="bi bi-tag-fill me-1"></i>${escapeHtml(aliasText)}</span>
+               <button class="btn btn-sm btn-link p-0 align-baseline" title="编辑备注" onclick="editCookieAlias('${cookie.id}', '${aliasSafe}')"><i class="bi bi-pencil"></i></button>`
+            : `<button class="btn btn-sm btn-outline-secondary py-0 px-2" onclick="editCookieAlias('${cookie.id}', '')" title="为该账号设置备注"><i class="bi bi-tag me-1"></i>设置备注</button>`;
+
         tr.innerHTML = `
         <td class="align-middle">
             <div class="cookie-id">
             <strong class="text-primary">${cookie.id}</strong>
             </div>
+            ${riskBadge}
         </td>
+        <td class="align-middle">${aliasCell}</td>
         <td class="align-middle">
             <div class="cookie-value" title="点击复制Cookie" style="font-family: monospace; font-size: 0.875rem; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
             ${cookie.value || '未设置'}
@@ -1165,6 +1206,204 @@ async function loadCookies() {
     }
 }
 
+// 引导用户在闲鱼网页端完成滑块验证（不能直接打开 punish 接口）
+async function showCaptchaHelp(cookieId) {
+    let rawUrl = '';
+    try {
+        const list = await fetchJSON(apiBase + '/cookies/details');
+        const item = (list || []).find(c => c.id === cookieId);
+        rawUrl = (item && item.risk_status && item.risk_status.captcha_url) || '';
+    } catch (e) {}
+
+    const html = `
+        <div class="modal fade" id="captchaHelpModal" tabindex="-1" aria-hidden="true">
+          <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+              <div class="modal-header">
+                <h5 class="modal-title"><i class="bi bi-shield-exclamation me-2"></i>账号 ${cookieId} 触发风控验证</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+              </div>
+              <div class="modal-body">
+                <div class="alert alert-danger mb-3">
+                  <i class="bi bi-exclamation-triangle-fill me-1"></i>
+                  <strong>不能在本页内嵌登录：</strong>
+                  浏览器出于隐私安全策略会拒绝跨站 iframe 共享 Cookie，
+                  在内嵌页面里登录后<strong>不会保留登录状态</strong>，会反复提示登录。
+                  请使用下方按钮在<strong>新标签页</strong>中完成。
+                </div>
+
+                <h6 class="mb-2">操作步骤</h6>
+                <ol class="mb-3">
+                  <li>点击下方 <span class="badge bg-primary">新标签页打开闲鱼</span>，在新标签页中完成账号登录。</li>
+                  <li>进入 <code>www.goofish.com/im</code> 私信页或任意商品页，命中风控会弹出滑块，按提示完成验证。</li>
+                  <li>验证通过后，<strong>导出最新 Cookie</strong>（推荐使用本系统的 <em>扫码登录</em>，或浏览器手动复制），
+                    用 <span class="badge bg-secondary">修改 Cookie</span> 覆盖该账号 —— 保存时会自动清除风控冷却。</li>
+                  <li>若你确认账号已恢复正常，但状态未刷新，可点 <span class="badge bg-secondary">标记已完成</span> 立即清除风控标记。</li>
+                </ol>
+
+                <div class="alert alert-info mb-0">
+                  <i class="bi bi-info-circle me-1"></i>
+                  闲鱼返回的 <code>/_____tmd_____/punish?...</code> 是阿里风控 SDK 内部接口，
+                  直接打开会跳 <code>/undefined</code>，<strong>不要</strong>使用该原始链接。
+                </div>
+
+                <details class="mt-3">
+                  <summary class="text-muted">高级：原始风控接口链接（仅供调试）</summary>
+                  <div class="mt-2">
+                    <textarea class="form-control" rows="3" readonly id="captchaRawUrl">${(rawUrl || '(无)').replace(/</g,'&lt;')}</textarea>
+                    <button class="btn btn-sm btn-outline-secondary mt-2" onclick="copyText(document.getElementById('captchaRawUrl').value, '原始链接已复制')">
+                      <i class="bi bi-clipboard me-1"></i>复制
+                    </button>
+                  </div>
+                </details>
+              </div>
+              <div class="modal-footer">
+                <button type="button" class="btn btn-primary" onclick="window.open('https://www.goofish.com/im','_blank','noopener')">
+                  <i class="bi bi-box-arrow-up-right me-1"></i>新标签页打开闲鱼
+                </button>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+              </div>
+            </div>
+          </div>
+        </div>`;
+
+    // 移除旧的同 ID 模态框，避免重复
+    const old = document.getElementById('captchaHelpModal');
+    if (old) old.remove();
+    document.body.insertAdjacentHTML('beforeend', html);
+    const modalEl = document.getElementById('captchaHelpModal');
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+    modalEl.addEventListener('hidden.bs.modal', () => modalEl.remove(), { once: true });
+    modal.show();
+}
+
+// 清除账号风控标记
+async function clearCookieRisk(cookieId) {
+    if (!confirm(`确认账号 "${cookieId}" 的风控验证已完成？\n\n建议：先在浏览器完成验证、或已用最新的 Cookie 覆盖该账号。`)) return;
+    try {
+        const resp = await fetch(`${apiBase}/cookies/${encodeURIComponent(cookieId)}/clear-risk`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${authToken}` }
+        });
+        if (resp.ok) {
+            showToast('已清除风控标记', 'success');
+            // 刷新账号表
+            if (typeof loadCookies === 'function') loadCookies();
+        } else {
+            const t = await resp.text();
+            showToast('清除失败: ' + t, 'error');
+        }
+    } catch (e) {
+        showToast('清除失败: ' + e, 'error');
+    }
+}
+
+// 编辑账号备注（使用 Bootstrap 模态框，避免某些浏览器拦截 prompt()）
+function editCookieAlias(cookieId, currentAlias) {
+    const modalEl = document.getElementById('cookieAliasEditModal');
+    if (!modalEl) {
+        showToast('未找到备注编辑模态框，请刷新页面', 'error');
+        return;
+    }
+    const idInput = document.getElementById('aliasEditCookieId');
+    const aliasInput = document.getElementById('aliasEditInput');
+    const hint = document.getElementById('aliasEditHint');
+
+    idInput.value = cookieId;
+    aliasInput.value = currentAlias || '';
+    if (hint) hint.textContent = '';
+
+    // 先克隆替换两个按钮（清空旧的 click 监听），再获取新引用
+    const oldSaveBtn = document.getElementById('aliasEditSaveBtn');
+    const newSaveBtn = oldSaveBtn.cloneNode(true);
+    oldSaveBtn.parentNode.replaceChild(newSaveBtn, oldSaveBtn);
+    const saveBtn = newSaveBtn;
+
+    const oldClearBtn = document.getElementById('aliasEditClearBtn');
+    const newClearBtn = oldClearBtn.cloneNode(true);
+    oldClearBtn.parentNode.replaceChild(newClearBtn, oldClearBtn);
+    const clearBtn = newClearBtn;
+
+    // 提交函数（使用替换后的新按钮引用）
+    const submitAlias = async (aliasValue) => {
+        const trimmed = (aliasValue || '').trim();
+        if (trimmed.length > 32) {
+            if (hint) hint.innerHTML = '<span class="text-danger">备注不能超过 32 个字符</span>';
+            return;
+        }
+        saveBtn.disabled = true;
+        clearBtn.disabled = true;
+        try {
+            const resp = await fetch(`${apiBase}/cookies/${encodeURIComponent(cookieId)}/alias`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+                body: JSON.stringify({ alias: trimmed })
+            });
+            if (resp.ok) {
+                showToast(trimmed ? `备注已更新为 "${trimmed}"` : '备注已清除', 'success');
+                bootstrap.Modal.getInstance(modalEl)?.hide();
+                if (typeof loadCookies === 'function') loadCookies();
+            } else {
+                const err = await resp.json().catch(() => ({}));
+                const msg = err.detail || `HTTP ${resp.status}`;
+                if (hint) hint.innerHTML = `<span class="text-danger">${msg}</span>`;
+                showToast(`保存失败: ${msg}`, 'error');
+            }
+        } catch (e) {
+            showToast('保存失败: ' + e, 'error');
+        } finally {
+            saveBtn.disabled = false;
+            clearBtn.disabled = false;
+        }
+    };
+
+    saveBtn.addEventListener('click', () => submitAlias(aliasInput.value));
+    clearBtn.addEventListener('click', () => submitAlias(''));
+
+    // 回车提交
+    aliasInput.onkeydown = (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            submitAlias(aliasInput.value);
+        }
+    };
+
+    const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+    modal.show();
+    // 自动聚焦
+    setTimeout(() => aliasInput.focus(), 200);
+}
+
+// 通用：复制任意文本到剪贴板（带降级方案）
+function copyText(text, successMsg) {
+    if (!text) {
+        showToast('内容为空', 'warning');
+        return;
+    }
+    const onOk = () => showToast(successMsg || '已复制到剪贴板', 'success');
+    const onErr = () => showToast('复制失败，请手动复制', 'error');
+    if (navigator.clipboard && window.isSecureContext !== false) {
+        navigator.clipboard.writeText(text).then(onOk).catch(() => fallback());
+    } else {
+        fallback();
+    }
+    function fallback() {
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+            onOk();
+        } catch (e) {
+            onErr();
+        }
+    }
+}
+
 // 复制Cookie
 function copyCookie(id, value) {
     if (!value || value === '未设置') {
@@ -1203,72 +1442,120 @@ async function delCookie(id) {
     }
 }
 
-// 内联编辑Cookie
+// 编辑Cookie：弹出大号编辑模态框（Cookie 串通常 1000+ 字符，单行输入框不实用）
 function editCookieInline(id, currentValue) {
-    const row = event.target.closest('tr');
-    const cookieValueCell = row.querySelector('.cookie-value');
-    const originalContent = cookieValueCell.innerHTML;
+    const safeId = String(id).replace(/[^a-zA-Z0-9_-]/g, '_');
+    const modalId = `editCookieModal_${safeId}`;
+    const taId = `editCookieTextarea_${safeId}`;
+    const counterId = `editCookieCounter_${safeId}`;
 
-    // 存储原始数据到全局变量，避免HTML注入问题
-    window.editingCookieData = {
-    id: id,
-    originalContent: originalContent,
-    originalValue: currentValue || ''
+    // 移除旧实例
+    const old = document.getElementById(modalId);
+    if (old) old.remove();
+
+    const initialValue = currentValue || '';
+    const html = `
+    <div class="modal fade" id="${modalId}" tabindex="-1" aria-hidden="true">
+      <div class="modal-dialog modal-xl modal-dialog-scrollable modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title"><i class="bi bi-key me-2"></i>修改 Cookie - <code class="text-primary">${escapeHtml(String(id))}</code></h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+          </div>
+          <div class="modal-body">
+            <div class="mb-2 d-flex justify-content-between align-items-center">
+              <label class="form-label mb-0">Cookie 内容</label>
+              <small class="text-muted">长度: <span id="${counterId}">0</span> 字符</small>
+            </div>
+            <textarea id="${taId}" class="form-control" rows="18"
+                      style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; white-space: pre; word-break: break-all;"
+                      placeholder="粘贴完整的闲鱼 Cookie 串，必须包含 unb / cookie2 / _m_h5_tk / _m_h5_tk_enc 等字段"
+                      spellcheck="false"></textarea>
+            <div class="form-text mt-2">
+              <i class="bi bi-info-circle me-1"></i>
+              建议在浏览器登录 <code>www.goofish.com</code> 后，从 DevTools → Application → Cookies 复制完整 Cookie 串粘贴到此处。保存后会自动清除旧的风控冷却。
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary me-auto" id="${taId}_paste">
+              <i class="bi bi-clipboard-plus me-1"></i>从剪贴板粘贴
+            </button>
+            <button type="button" class="btn btn-outline-danger" id="${taId}_clear">
+              <i class="bi bi-eraser me-1"></i>清空
+            </button>
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+            <button type="button" class="btn btn-primary" id="${taId}_save">
+              <i class="bi bi-check2 me-1"></i>保存
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+    document.body.insertAdjacentHTML('beforeend', html);
+
+    const modalEl = document.getElementById(modalId);
+    const ta = document.getElementById(taId);
+    const counter = document.getElementById(counterId);
+    ta.value = initialValue;
+    counter.textContent = initialValue.length;
+    ta.addEventListener('input', () => { counter.textContent = ta.value.length; });
+
+    document.getElementById(`${taId}_clear`).onclick = () => {
+        ta.value = '';
+        counter.textContent = 0;
+        ta.focus();
     };
+    document.getElementById(`${taId}_paste`).onclick = async () => {
+        try {
+            const text = await navigator.clipboard.readText();
+            if (text) {
+                ta.value = text;
+                counter.textContent = ta.value.length;
+                showToast('已从剪贴板粘贴', 'success');
+            }
+        } catch (e) {
+            showToast('无法读取剪贴板，请手动粘贴 (Ctrl+V)', 'warning');
+        }
+    };
+    document.getElementById(`${taId}_save`).onclick = () => saveCookieFromModal(id, taId, modalId);
 
-    // 创建编辑界面容器
-    const editContainer = document.createElement('div');
-    editContainer.className = 'd-flex gap-2';
-
-    // 创建输入框
-    const input = document.createElement('input');
-    input.type = 'text';
-    input.className = 'form-control form-control-sm';
-    input.id = `edit-${id}`;
-    input.value = currentValue || '';
-    input.placeholder = '输入新的Cookie值';
-
-    // 创建保存按钮
-    const saveBtn = document.createElement('button');
-    saveBtn.className = 'btn btn-sm btn-success';
-    saveBtn.title = '保存';
-    saveBtn.innerHTML = '<i class="bi bi-check"></i>';
-    saveBtn.onclick = () => saveCookieInline(id);
-
-    // 创建取消按钮
-    const cancelBtn = document.createElement('button');
-    cancelBtn.className = 'btn btn-sm btn-secondary';
-    cancelBtn.title = '取消';
-    cancelBtn.innerHTML = '<i class="bi bi-x"></i>';
-    cancelBtn.onclick = () => cancelCookieEdit(id);
-
-    // 组装编辑界面
-    editContainer.appendChild(input);
-    editContainer.appendChild(saveBtn);
-    editContainer.appendChild(cancelBtn);
-
-    // 替换原内容
-    cookieValueCell.innerHTML = '';
-    cookieValueCell.appendChild(editContainer);
-
-    // 聚焦输入框
-    input.focus();
-    input.select();
-
-    // 添加键盘事件监听
-    input.addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') {
-        e.preventDefault();
-        saveCookieInline(id);
-    } else if (e.key === 'Escape') {
-        e.preventDefault();
-        cancelCookieEdit(id);
-    }
+    // Ctrl+Enter 快速保存
+    ta.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+            e.preventDefault();
+            saveCookieFromModal(id, taId, modalId);
+        }
     });
 
-    // 禁用该行的其他按钮
-    const actionButtons = row.querySelectorAll('.btn-group button');
-    actionButtons.forEach(btn => btn.disabled = true);
+    modalEl.addEventListener('hidden.bs.modal', () => modalEl.remove(), { once: true });
+    modalEl.addEventListener('shown.bs.modal', () => { ta.focus(); ta.select(); }, { once: true });
+    bootstrap.Modal.getOrCreateInstance(modalEl).show();
+}
+
+// 保存模态框中的 Cookie
+async function saveCookieFromModal(id, taId, modalId) {
+    const ta = document.getElementById(taId);
+    const newValue = (ta?.value || '').trim();
+    if (!newValue) {
+        showToast('Cookie值不能为空', 'warning');
+        return;
+    }
+    try {
+        toggleLoading(true);
+        await fetchJSON(apiBase + `/cookies/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, value: newValue })
+        });
+        showToast('Cookie 已更新', 'success');
+        const modalEl = document.getElementById(modalId);
+        if (modalEl) bootstrap.Modal.getOrCreateInstance(modalEl).hide();
+        await loadCookies();
+    } catch (e) {
+        // fetchJSON 已处理错误提示
+    } finally {
+        toggleLoading(false);
+    }
 }
 
 // 保存内联编辑的Cookie
@@ -1589,11 +1876,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     // 首先检查认证状态
     const isAuthenticated = await checkAuth();
     if (!isAuthenticated) return;
+    // 添加Cookie表单 - Cookie 值字符计数
+    const _cv = document.getElementById('cookieValue');
+    const _cvc = document.getElementById('cookieValueCounter');
+    if (_cv && _cvc) {
+        const _upd = () => { _cvc.textContent = (_cv.value || '').length; };
+        _cv.addEventListener('input', _upd);
+        _upd();
+    }
+
     // 添加Cookie表单提交
     document.getElementById('addForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const id = document.getElementById('cookieId').value.trim();
     const value = document.getElementById('cookieValue').value.trim();
+    const alias = (document.getElementById('cookieAlias')?.value || '').trim();
 
     if (!id || !value) return;
 
@@ -1604,8 +1901,26 @@ document.addEventListener('DOMContentLoaded', async () => {
         body: JSON.stringify({ id, value })
         });
 
+        // 如果填了备注，单独写入（便于复用统一的唯一性校验）
+        if (alias) {
+            try {
+                const resp = await fetch(`${apiBase}/cookies/${encodeURIComponent(id)}/alias`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${authToken}` },
+                    body: JSON.stringify({ alias })
+                });
+                if (!resp.ok) {
+                    const err = await resp.json().catch(() => ({}));
+                    showToast(`账号已添加，但备注保存失败: ${err.detail || resp.status}`, 'warning');
+                }
+            } catch (e2) {
+                showToast('账号已添加，但备注保存异常', 'warning');
+            }
+        }
+
         document.getElementById('cookieId').value = '';
         document.getElementById('cookieValue').value = '';
+        if (document.getElementById('cookieAlias')) document.getElementById('cookieAlias').value = '';
         showToast(`账号 "${id}" 添加成功`);
         loadCookies();
     } catch (err) {
@@ -1781,9 +2096,11 @@ function renderDefaultRepliesList(accounts, defaultReplies) {
         contentPreview = contentPreview.substring(0, 50) + '...';
     }
 
+    const aliasTxt = cookieAliasMap[accountId] || '';
     tr.innerHTML = `
         <td>
         <strong class="text-primary">${accountId}</strong>
+        ${aliasTxt ? `<span class="badge bg-info text-dark ms-2" title="备注"><i class="bi bi-tag-fill me-1"></i>${escapeHtml(aliasTxt)}</span>` : ''}
         </td>
         <td>${statusBadge}</td>
         <td>
@@ -2763,8 +3080,12 @@ function renderMessageNotifications(accounts, notifications) {
         '<span class="badge bg-success">启用</span>' :
         '<span class="badge bg-secondary">禁用</span>';
 
+    const aliasTxt = cookieAliasMap[accountId] || '';
     tr.innerHTML = `
-        <td><strong class="text-primary">${accountId}</strong></td>
+        <td>
+        <strong class="text-primary">${accountId}</strong>
+        ${aliasTxt ? `<span class="badge bg-info text-dark ms-2" title="备注"><i class="bi bi-tag-fill me-1"></i>${escapeHtml(aliasTxt)}</span>` : ''}
+        </td>
         <td>${channelsList}</td>
         <td>${status}</td>
         <td>
@@ -3580,6 +3901,7 @@ function renderDeliveryRulesList(rules) {
 
     tr.innerHTML = `
         <td>
+        ${rule.item_id ? `<div><span class="badge bg-success"><i class="bi bi-bullseye"></i> ID:${rule.item_id}</span></div>` : ''}
         <div class="fw-bold">${rule.keyword}</div>
         ${rule.description ? `<small class="text-muted">${rule.description}</small>` : ''}
         </td>
@@ -3702,6 +4024,7 @@ async function loadCardsForSelect() {
 async function saveDeliveryRule() {
     try {
     const keyword = document.getElementById('productKeyword').value;
+    const itemId = (document.getElementById('productItemId')?.value || '').trim();
     const cardId = document.getElementById('selectedCard').value;
     const deliveryCount = document.getElementById('deliveryCount').value;
     const enabled = document.getElementById('ruleEnabled').checked;
@@ -3714,6 +4037,7 @@ async function saveDeliveryRule() {
 
     const ruleData = {
         keyword: keyword,
+        item_id: itemId || null,
         card_id: parseInt(cardId),
         delivery_count: parseInt(deliveryCount),
         enabled: enabled,
@@ -4049,6 +4373,8 @@ async function editDeliveryRule(ruleId) {
         // 填充编辑表单
         document.getElementById('editRuleId').value = rule.id;
         document.getElementById('editProductKeyword').value = rule.keyword;
+        const editItemIdEl = document.getElementById('editProductItemId');
+        if (editItemIdEl) editItemIdEl.value = rule.item_id || '';
         document.getElementById('editDeliveryCount').value = rule.delivery_count || 1;
         document.getElementById('editRuleEnabled').checked = rule.enabled;
         document.getElementById('editRuleDescription').value = rule.description || '';
@@ -4133,6 +4459,7 @@ async function updateDeliveryRule() {
     try {
     const ruleId = document.getElementById('editRuleId').value;
     const keyword = document.getElementById('editProductKeyword').value;
+    const itemId = (document.getElementById('editProductItemId')?.value || '').trim();
     const cardId = document.getElementById('editSelectedCard').value;
     const deliveryCount = document.getElementById('editDeliveryCount').value;
     const enabled = document.getElementById('editRuleEnabled').checked;
@@ -4145,6 +4472,7 @@ async function updateDeliveryRule() {
 
     const ruleData = {
         keyword: keyword,
+        item_id: itemId || null,
         card_id: parseInt(cardId),
         delivery_count: parseInt(deliveryCount),
         enabled: enabled,
@@ -4690,11 +5018,57 @@ async function toggleItemConfirmDelivery(cookieId, itemId, requireConfirm) {
     }
 }
 
+// 商品ID -> 已配置发货规则 的映射
+let deliveryRulesByItemId = {};
+
+// 加载所有发货规则，按商品ID聚合，供商品列表展示使用
+async function loadDeliveryRulesMap() {
+    try {
+        const resp = await fetch(`${apiBase}/delivery-rules`, {
+            headers: { 'Authorization': `Bearer ${authToken}` }
+        });
+        if (!resp.ok) return;
+        const rules = await resp.json();
+        const map = {};
+        (rules || []).forEach(r => {
+            const id = r.item_id || '';
+            if (!id) return;
+            if (!map[id]) map[id] = [];
+            map[id].push(r);
+        });
+        deliveryRulesByItemId = map;
+    } catch (e) {
+        console.error('加载发货规则映射失败:', e);
+    }
+}
+
+// 跳转到自动发货页面并预填商品ID（从商品管理页一键添加规则）
+function gotoAddDeliveryRuleForItem(itemId, itemTitle) {
+    if (typeof showSection === 'function') showSection('auto-delivery');
+    // 等切换动画 + 卡券下拉加载完成后再打开模态框
+    setTimeout(() => {
+        if (typeof showAddDeliveryRuleModal === 'function') {
+            showAddDeliveryRuleModal();
+            setTimeout(() => {
+                const idEl = document.getElementById('productItemId');
+                if (idEl) idEl.value = itemId || '';
+                const kwEl = document.getElementById('productKeyword');
+                if (kwEl && !kwEl.value) kwEl.value = itemTitle || itemId || '';
+                const descEl = document.getElementById('ruleDescription');
+                if (descEl && !descEl.value) descEl.value = `从商品管理跳转添加：${itemTitle || itemId || ''}`;
+            }, 150);
+        }
+    }, 80);
+}
+
 // 加载商品列表
 async function loadItems() {
     try {
     // 先加载Cookie列表用于筛选
     await loadCookieFilter();
+
+    // 同步加载发货规则映射，便于在商品行展示已配置规则
+    await loadDeliveryRulesMap();
 
     // 加载商品列表
     await refreshItemsData();
@@ -4707,6 +5081,9 @@ async function loadItems() {
 // 只刷新商品数据，不重新加载筛选器
 async function refreshItemsData() {
     try {
+    // 刷新发货规则映射（保证已配置规则展示是最新的）
+    await loadDeliveryRulesMap();
+
     const selectedCookie = document.getElementById('itemCookieFilter').value;
     if (selectedCookie) {
         await loadItemsByCookie();
@@ -4731,6 +5108,10 @@ async function loadCookieFilter() {
     if (response.ok) {
         const accounts = await response.json();
         const select = document.getElementById('itemCookieFilter');
+
+        // 同步全局 备注 映射
+        cookieAliasMap = {};
+        accounts.forEach(c => { if (c && c.id) cookieAliasMap[c.id] = c.alias || ''; });
 
         // 保存当前选择的值
         const currentValue = select.value;
@@ -4761,7 +5142,7 @@ async function loadCookieFilter() {
         enabledAccounts.forEach(account => {
         const option = document.createElement('option');
         option.value = account.id;
-        option.textContent = `🟢 ${account.id}`;
+        option.textContent = `🟢 ${formatAccountLabel(account.id, account.alias)}`;
         select.appendChild(option);
         });
 
@@ -4779,7 +5160,7 @@ async function loadCookieFilter() {
         disabledAccounts.forEach(account => {
             const option = document.createElement('option');
             option.value = account.id;
-            option.textContent = `🔴 ${account.id} (已禁用)`;
+            option.textContent = `🔴 ${formatAccountLabel(account.id, account.alias)} (已禁用)`;
             select.appendChild(option);
         });
         }
@@ -4849,7 +5230,7 @@ function displayItems(items) {
     const tbody = document.getElementById('itemsTableBody');
 
     if (!items || items.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted">暂无商品数据</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="text-center text-muted">暂无商品数据</td></tr>';
     // 重置选择状态
     const selectAllCheckbox = document.getElementById('selectAllItems');
     if (selectAllCheckbox) {
@@ -4866,6 +5247,16 @@ function displayItems(items) {
     if (itemTitleDisplay.length > 30) {
         itemTitleDisplay = itemTitleDisplay.substring(0, 30) + '...';
     }
+
+    // 处理商品描述显示（与标题同列）
+    let itemDescDisplay = '';
+    if (item.item_description) {
+        const desc = String(item.item_description);
+        itemDescDisplay = desc.length > 60 ? desc.substring(0, 60) + '...' : desc;
+    }
+
+    // 价格显示
+    const itemPriceDisplay = item.item_price ? String(item.item_price) : '';
 
     // 处理商品详情显示
     let itemDetailDisplay = '未设置';
@@ -4897,6 +5288,32 @@ function displayItems(items) {
         '<span class="badge bg-warning" title="买家需确认收货后才发货"><i class="bi bi-check-circle-fill me-1"></i>需确认</span>' :
         '<span class="badge bg-light text-dark" title="付款后直接发货"><i class="bi bi-x-circle me-1"></i>直接发</span>';
 
+    // 商品ID 可复制单元格
+    const itemIdSafe = escapeHtml(item.item_id);
+    const itemIdCell = `
+        <div class="d-flex align-items-center gap-1">
+          <code class="item-id-text user-select-all"
+                role="button" tabindex="0"
+                onclick="copyText('${itemIdSafe}', '商品ID 已复制: ${itemIdSafe}')"
+                title="点击复制商品ID"
+                style="cursor:pointer; font-size:0.85rem; background:#f8f9fa; padding:2px 6px; border-radius:4px;">
+            ${itemIdSafe}
+          </code>
+          <button type="button" class="btn btn-sm btn-link p-0 text-secondary"
+                  onclick="copyText('${itemIdSafe}', '商品ID 已复制: ${itemIdSafe}')"
+                  title="复制商品ID">
+            <i class="bi bi-clipboard"></i>
+          </button>
+        </div>
+        ${itemPriceDisplay ? `<small class="text-danger fw-bold mt-1 d-block"><i class="bi bi-currency-yen"></i> ${escapeHtml(itemPriceDisplay)}</small>` : ''}
+    `;
+
+    // 商品标题 + 描述
+    const titleCell = `
+        <div class="fw-semibold" title="${escapeHtml(item.item_title || '未设置')}">${escapeHtml(itemTitleDisplay)}</div>
+        ${itemDescDisplay ? `<small class="text-muted d-block" title="${escapeHtml(item.item_description || '')}">${escapeHtml(itemDescDisplay)}</small>` : ''}
+    `;
+
     return `
         <tr>
         <td>
@@ -4905,17 +5322,41 @@ function displayItems(items) {
                     data-item-id="${escapeHtml(item.item_id)}"
                     onchange="updateSelectAllState()">
         </td>
-        <td>${escapeHtml(item.cookie_id)}</td>
-        <td>${escapeHtml(item.item_id)}</td>
-        <td title="${escapeHtml(item.item_title || '未设置')}">${escapeHtml(itemTitleDisplay)}</td>
+        <td>
+            ${escapeHtml(item.cookie_id)}
+            ${cookieAliasMap[item.cookie_id] ? `<br><span class="badge bg-info text-dark" title="备注"><i class="bi bi-tag-fill me-1"></i>${escapeHtml(cookieAliasMap[item.cookie_id])}</span>` : ''}
+        </td>
+        <td>${itemIdCell}</td>
+        <td>${titleCell}</td>
         <td title="${escapeHtml(item.item_detail || '未设置')}">${escapeHtml(itemDetailDisplay)}</td>
         <td>${multiSpecDisplay}</td>
         <td>${confirmDeliveryDisplay}</td>
+        <td>${(() => {
+            const matched = deliveryRulesByItemId[item.item_id] || [];
+            if (matched.length === 0) {
+                return `<span class="text-muted small"><i class="bi bi-dash-circle"></i> 未配置</span>`;
+            }
+            const cardTypeMap = { api: 'API', text: '文字', data: '数据', image: '图片' };
+            return matched.map(r => {
+                const cls = r.enabled ? 'bg-primary' : 'bg-secondary';
+                const cardType = cardTypeMap[r.card_type] || r.card_type || '';
+                const specSuffix = (r.is_multi_spec && r.spec_name && r.spec_value) ? ` [${escapeHtml(r.spec_name)}:${escapeHtml(r.spec_value)}]` : '';
+                const tip = `${r.card_name || '未知卡券'}${cardType ? '（' + cardType + '）' : ''}${specSuffix} · 关键字：${r.keyword || ''}`;
+                return `<span class="badge ${cls} me-1 mb-1" role="button"
+                              title="${escapeHtml(tip)} · 点击编辑"
+                              onclick="(function(){ if (typeof showSection==='function') showSection('auto-delivery'); setTimeout(()=>editDeliveryRule(${r.id}), 80); })()">
+                          <i class="bi bi-truck me-1"></i>${escapeHtml(r.card_name || ('规则#' + r.id))}${specSuffix}
+                        </span>`;
+            }).join('');
+        })()}</td>
         <td>${formatDateTime(item.updated_at)}</td>
         <td>
             <div class="btn-group" role="group">
             <button class="btn btn-sm btn-outline-primary" onclick="editItem('${escapeHtml(item.cookie_id)}', '${escapeHtml(item.item_id)}')" title="编辑详情">
                 <i class="bi bi-pencil"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-success" onclick="gotoAddDeliveryRuleForItem('${escapeHtml(item.item_id)}', '${escapeHtml((item.item_title || '').replace(/'/g, '&#39;'))}')" title="为该商品添加发货规则">
+                <i class="bi bi-truck"></i>
             </button>
             <button class="btn btn-sm btn-outline-danger" onclick="deleteItem('${escapeHtml(item.cookie_id)}', '${escapeHtml(item.item_id)}', '${escapeHtml(item.item_title || item.item_id)}')" title="删除">
                 <i class="bi bi-trash"></i>
@@ -5836,57 +6277,52 @@ async function checkQRCodeStatus() {
     }
 }
 
-// 显示需要验证的提示
+
+// 显示需要验证的提示：内嵌 iframe 让用户直接在后台完成手机验证，无需切到外部浏览器
 function showVerificationRequired(data) {
-    if (data.verification_url) {
-    // 隐藏二维码区域
+    if (!data.verification_url) return;
+
     document.getElementById('qrCodeContainer').style.display = 'none';
     document.getElementById('qrCodeImage').style.display = 'none';
 
-    // 显示验证提示
+    const safeUrl = String(data.verification_url).replace(/"/g, '&quot;');
     const verificationHtml = `
-        <div class="text-center">
-        <div class="mb-4">
-            <i class="bi bi-shield-exclamation text-warning" style="font-size: 4rem;"></i>
-        </div>
-        <h5 class="text-warning mb-3">账号需要手机验证</h5>
-        <div class="alert alert-warning border-0 mb-4">
-            <i class="bi bi-info-circle me-2"></i>
-            <strong>检测到账号存在风控，需要进行手机验证才能完成登录</strong>
-        </div>
-        <div class="mb-4">
-            <p class="text-muted mb-3">请点击下方按钮，在新窗口中完成手机验证：</p>
-            <a href="${data.verification_url}" target="_blank" class="btn btn-warning btn-lg">
-            <i class="bi bi-phone me-2"></i>
-            打开手机验证页面
+        <div>
+          <div class="alert alert-warning d-flex align-items-center mb-3">
+            <i class="bi bi-shield-exclamation me-2 fs-4"></i>
+            <div class="flex-grow-1">
+              <strong>账号触发风控，请在下方完成手机验证</strong><br>
+              <small class="text-muted">验证完成后，关闭本对话框并<strong>重新扫码登录</strong>即可。</small>
+            </div>
+            <a href="${safeUrl}" target="_blank" class="btn btn-sm btn-outline-secondary ms-2" rel="noopener">
+              <i class="bi bi-box-arrow-up-right"></i> 在新窗口打开
             </a>
-        </div>
-        <div class="alert alert-info border-0">
-            <i class="bi bi-lightbulb me-2"></i>
-            <small>
-            <strong>验证步骤：</strong><br>
-            1. 点击上方按钮打开验证页面<br>
-            2. 按照页面提示完成手机验证<br>
-            3. 验证完成后，重新扫码登录
-            </small>
-        </div>
-        </div>
-    `;
+          </div>
+          <div class="ratio" style="--bs-aspect-ratio: 75%; min-height: 480px;">
+            <iframe id="verificationIframe"
+                    src="${safeUrl}"
+                    style="border:1px solid #dee2e6; border-radius: 6px; width:100%; height:100%;"
+                    referrerpolicy="no-referrer-when-downgrade"
+                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+                    allow="camera; microphone"></iframe>
+          </div>
+          <div class="form-text mt-2">
+            <i class="bi bi-info-circle me-1"></i>
+            若 iframe 显示空白、被阿里安全策略拒绝，或<strong>反复提示重新登录</strong>（浏览器拦截了跨站 Cookie），
+            请点右上角"在新窗口打开"完成验证。
+          </div>
+        </div>`;
 
-    // 创建验证提示容器
     let verificationContainer = document.getElementById('verificationContainer');
     if (!verificationContainer) {
         verificationContainer = document.createElement('div');
         verificationContainer.id = 'verificationContainer';
         document.querySelector('#qrCodeLoginModal .modal-body').appendChild(verificationContainer);
     }
-
     verificationContainer.innerHTML = verificationHtml;
     verificationContainer.style.display = 'block';
 
-    // 显示Toast提示
-    showToast('账号需要手机验证，请按照提示完成验证', 'warning');
-    }
+    showToast('账号需要手机验证，已内嵌验证页面', 'warning');
 }
 
 // 处理扫码成功
