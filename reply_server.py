@@ -93,7 +93,9 @@ class LoginResponse(BaseModel):
     success: bool
     token: Optional[str] = None
     message: str
-    user_id: Optional[int] = None
+    expired: Optional[bool] = False           # 用户账号是否已到期
+    expires_at: Optional[float] = None        # 到期时间戳（None 表示永久）
+    user_id: Optional[int] = None             # 登录用户的 ID
 
 
 class ChangePasswordRequest(BaseModel):
@@ -190,17 +192,22 @@ def verify_token(credentials: Optional[HTTPAuthorizationCredentials] = Depends(s
         return None
 
     # 非管理员还要检查账号是否到期
+    # 注意：到期不再吊销 token，仅在 token_data 上打 expired 标记，
+    # 让用户仍能登录后台查看数据并看到到期提示，但其名下的闲鱼任务会被暂停。
+    token_data['expired'] = False
+    token_data['expires_at'] = None
     if token_data.get('username') != ADMIN_USERNAME:
         try:
             expiry = db_manager.get_user_expiry(token_data['user_id'])
+            token_data['expires_at'] = expiry
             if expiry is not None and time.time() >= expiry:
-                # 到期则吊销当前 token
-                del SESSION_TOKENS[token]
+                token_data['expired'] = True
+                # 懒触发：第一次检测到到期时，停止该用户名下所有任务（幂等）
                 try:
-                    db_manager.delete_session(token)
-                except Exception:
-                    pass
-                return None
+                    if cookie_manager.manager is not None:
+                        cookie_manager.manager.stop_tasks_for_user(token_data['user_id'])
+                except Exception as _e2:
+                    logger.warning(f"暂停到期用户任务失败: {_e2}")
         except Exception as _e:
             logger.warning(f"检查用户到期失败: {_e}")
 
@@ -316,7 +323,7 @@ class ResponseModel(BaseModel):
 app = FastAPI(
     title="Xianyu Auto Reply API",
     version="1.0.0",
-    description="闲鱼自动回复系统API",
+    description="闲鱼管理系统API",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -506,6 +513,32 @@ async def item_search_page():
         return HTMLResponse('<h3>Item search page not found</h3>')
 
 
+def _compute_login_expiry(user: Dict[str, Any]) -> Tuple[bool, Optional[float], str]:
+    """登录成功后计算账号到期信息。
+
+    返回: (expired, expires_at, message)
+    若已到期，会同步暂停该用户名下所有闲鱼账号任务（幂等）。
+    """
+    if user.get('username') == ADMIN_USERNAME:
+        return False, None, "登录成功"
+    expired = False
+    expires_at: Optional[float] = None
+    msg = "登录成功"
+    try:
+        expires_at = db_manager.get_user_expiry(user['id'])
+        if expires_at is not None and time.time() >= expires_at:
+            expired = True
+            msg = "登录成功，但您的账号已到期，名下闲鱼账号任务已自动暂停。请联系管理员续期。"
+            try:
+                if cookie_manager.manager is not None:
+                    cookie_manager.manager.stop_tasks_for_user(user['id'])
+            except Exception as _e:
+                logger.warning(f"登录时暂停到期用户任务失败: {_e}")
+    except Exception as _e:
+        logger.warning(f"登录时检查用户到期失败: {_e}")
+    return expired, expires_at, msg
+
+
 # 登录接口
 @app.post('/login')
 async def login(request: LoginRequest):
@@ -539,10 +572,13 @@ async def login(request: LoginRequest):
                 else:
                     logger.info(f"【{user['username']}#{user['id']}】登录成功")
 
+                _expired, _exp_at, _msg = _compute_login_expiry(user)
                 return LoginResponse(
                     success=True,
                     token=token,
-                    message="登录成功",
+                    message=_msg,
+                    expired=_expired,
+                    expires_at=_exp_at,
                     user_id=user['id']
                 )
 
@@ -573,10 +609,13 @@ async def login(request: LoginRequest):
 
             logger.info(f"【{user['username']}#{user['id']}】邮箱登录成功")
 
+            _expired, _exp_at, _msg = _compute_login_expiry(user)
             return LoginResponse(
                 success=True,
                 token=token,
-                message="登录成功",
+                message=_msg,
+                expired=_expired,
+                expires_at=_exp_at,
                 user_id=user['id']
             )
 
@@ -622,10 +661,13 @@ async def login(request: LoginRequest):
 
         logger.info(f"【{user['username']}#{user['id']}】验证码登录成功")
 
+        _expired, _exp_at, _msg = _compute_login_expiry(user)
         return LoginResponse(
             success=True,
             token=token,
-            message="登录成功",
+            message=_msg,
+            expired=_expired,
+            expires_at=_exp_at,
             user_id=user['id']
         )
 
@@ -643,7 +685,9 @@ async def verify(user_info: Optional[Dict[str, Any]] = Depends(verify_token)):
         return {
             "authenticated": True,
             "user_id": user_info['user_id'],
-            "username": user_info['username']
+            "username": user_info['username'],
+            "expired": bool(user_info.get('expired')),
+            "expires_at": user_info.get('expires_at')
         }
     return {"authenticated": False}
 
@@ -3208,6 +3252,15 @@ def grant_entitlement(user_id: int, req: GrantRequest,
     if new_expiry is None:
         raise HTTPException(status_code=500, detail="发放失败")
     log_with_user('info', f"给 user_id={user_id} ({target['username']}) 发放 {days} 天权益", admin_user)
+
+    # 续期后若用户已不再到期，自动恢复其名下闲鱼任务
+    try:
+        if new_expiry is None or time.time() < new_expiry:
+            if cookie_manager.manager is not None:
+                cookie_manager.manager.start_tasks_for_user(user_id)
+    except Exception as _e:
+        logger.warning(f"续期后恢复任务失败: {_e}")
+
     return {"success": True, "expires_at": new_expiry, "days_added": days}
 
 
@@ -3225,6 +3278,18 @@ def set_user_expiry(user_id: int, req: ExpiryRequest,
     if not db_manager.set_user_expiry(user_id, req.expires_at):
         raise HTTPException(status_code=500, detail="设置失败")
     log_with_user('info', f"设置 user_id={user_id} 到期={req.expires_at}", admin_user)
+
+    # 同步任务状态：到期则停，未到期/永久则恢复
+    try:
+        mgr = cookie_manager.manager
+        if mgr is not None:
+            if req.expires_at is not None and time.time() >= req.expires_at:
+                mgr.stop_tasks_for_user(user_id)
+            else:
+                mgr.start_tasks_for_user(user_id)
+    except Exception as _e:
+        logger.warning(f"设置到期后同步任务状态失败: {_e}")
+
     return {"success": True}
 
 

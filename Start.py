@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 from pathlib import Path
 from loguru import logger
 
-from config import AUTO_REPLY, COOKIES_LIST
+from config import AUTO_REPLY, COOKIES_LIST, config as _global_config
 import cookie_manager as cm
 from db_manager import db_manager
 from file_log_collector import setup_file_logging
@@ -85,14 +85,49 @@ async def main():
     print("CookieManager 创建完成")
 
     # 1) 从数据库加载的 Cookie 已经在 CookieManager 初始化时完成
-    # 为每个启用的 Cookie 启动任务
-    for cid, val in manager.cookies.items():
-        # 检查账号是否启用
-        if not manager.get_cookie_status(cid):
-            logger.info(f"跳过禁用的 Cookie: {cid}")
-            continue
+    # 为每个启用的 Cookie 启动任务（错峰启动 / staggered startup）
+    #
+    # 错峰启动：避免重启时所有账号同一秒一起拉 WS / 调 mtop login.token，
+    # 同 IP 的密集请求是阿里风控最敏感的"账号簇"信号之一。
+    #
+    # 配置项（global_config.yml，可选）：
+    #   STARTUP_STAGGER:
+    #     enabled: true          # 总开关，默认 true
+    #     step_seconds: 15       # 相邻账号之间的基础间隔
+    #     jitter_seconds: 8      # 每个账号在基础间隔上的随机抖动（±）
+    #     max_total_seconds: 600 # 最大总错峰时长上限（防止账号过多时尾部等太久）
+    #     first_delay: 0         # 第 1 个账号的延迟（默认 0，立即启动）
+    import random as _random
+    stagger_cfg = (_global_config.get('STARTUP_STAGGER') or {}) if isinstance(_global_config.get('STARTUP_STAGGER', {}), dict) else {}
+    stagger_enabled = bool(stagger_cfg.get('enabled', True))
+    step_seconds = float(stagger_cfg.get('step_seconds', 15))
+    jitter_seconds = float(stagger_cfg.get('jitter_seconds', 8))
+    max_total_seconds = float(stagger_cfg.get('max_total_seconds', 600))
+    first_delay = float(stagger_cfg.get('first_delay', 0))
 
+    enabled_cookies = [(cid, val) for cid, val in manager.cookies.items() if manager.get_cookie_status(cid)]
+    skipped_cookies = [cid for cid in manager.cookies if not manager.get_cookie_status(cid)]
+    for cid in skipped_cookies:
+        logger.info(f"跳过禁用的 Cookie: {cid}")
+
+    if stagger_enabled and len(enabled_cookies) > 1:
+        logger.info(
+            f"启用错峰启动：共 {len(enabled_cookies)} 个账号，"
+            f"step={step_seconds}s ±{jitter_seconds}s，封顶 {max_total_seconds}s"
+        )
+    else:
+        logger.info(f"未启用错峰启动（账号数={len(enabled_cookies)}, enabled={stagger_enabled}）")
+
+    for idx, (cid, val) in enumerate(enabled_cookies):
         try:
+            # 计算该账号的启动延迟
+            if stagger_enabled and len(enabled_cookies) > 1:
+                base_delay = first_delay + idx * step_seconds
+                jitter = _random.uniform(-jitter_seconds, jitter_seconds) if jitter_seconds > 0 else 0
+                start_delay = max(0.0, min(base_delay + jitter, max_total_seconds))
+            else:
+                start_delay = 0
+
             # 直接启动任务，不重新保存到数据库
             from db_manager import db_manager
             logger.info(f"正在获取Cookie详细信息: {cid}")
@@ -100,16 +135,16 @@ async def main():
             user_id = cookie_info.get('user_id') if cookie_info else None
             logger.info(f"Cookie详细信息获取成功: {cid}, user_id: {user_id}")
 
-            logger.info(f"正在创建异步任务: {cid}")
-            task = loop.create_task(manager._run_xianyu(cid, val, user_id))
+            logger.info(f"正在创建异步任务: {cid}（计划延迟 {start_delay:.1f}s）")
+            task = loop.create_task(manager._run_xianyu(cid, val, user_id, start_delay=start_delay))
             manager.tasks[cid] = task
-            logger.info(f"启动数据库中的 Cookie 任务: {cid} (用户ID: {user_id})")
+            logger.info(f"启动数据库中的 Cookie 任务: {cid} (用户ID: {user_id}, 延迟 {start_delay:.1f}s)")
             logger.info(f"任务已添加到管理器，当前任务数: {len(manager.tasks)}")
         except Exception as e:
             logger.error(f"启动 Cookie 任务失败: {cid}, {e}")
             import traceback
             logger.error(f"详细错误信息: {traceback.format_exc()}")
-    
+
     # 2) 如果配置文件中有新的 Cookie，也加载它们
     for entry in COOKIES_LIST:
         cid = entry.get('id')

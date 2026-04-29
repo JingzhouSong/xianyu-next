@@ -6,6 +6,7 @@
   <title>登录 - 闲鱼自动回复管理系统</title>
   <link rel="stylesheet" href="/static/lib/bootstrap/bootstrap.min.css">
   <link rel="stylesheet" href="/static/lib/bootstrap-icons/bootstrap-icons.css">
+  <script>(function(){try{var m=localStorage.getItem('theme_mode')||'auto';var r=m==='auto'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):m;document.documentElement.setAttribute('data-bs-theme',r==='dark'?'dark':'light');}catch(e){}})();</script>
   <style>
     :root {
       --primary-color: #0d6efd;
@@ -370,6 +371,19 @@
         if (result.success) {
           // 保存token到localStorage
           localStorage.setItem('auth_token', result.token);
+
+          // 用户已到期：写入提示标记，进入后台后由 app.js 显示横幅
+          if (result.expired) {
+            try {
+              localStorage.setItem('expiry_notice', JSON.stringify({
+                expired: true,
+                expires_at: result.expires_at || null,
+                message: result.message || '您的账号已到期，名下闲鱼账号任务已自动暂停。'
+              }));
+            } catch (_) {}
+          } else {
+            localStorage.removeItem('expiry_notice');
+          }
 
           // 检查是否有重定向URL
           const redirectUrl = localStorage.getItem('redirectAfterLogin');

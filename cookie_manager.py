@@ -56,9 +56,23 @@ class CookieManager:
         return True
 
     # ------------------------ 内部协程 ------------------------
-    async def _run_xianyu(self, cookie_id: str, cookie_value: str, user_id: int = None):
-        """在事件循环中启动 XianyuLive.main"""
+    async def _run_xianyu(self, cookie_id: str, cookie_value: str, user_id: int = None, start_delay: float = 0):
+        """在事件循环中启动 XianyuLive.main
+
+        Args:
+            start_delay: 启动前等待的秒数。用于多账号"错峰启动"——避免重启时所有账号
+                同一秒内一起拉起 WS / 调用 mtop login.token，从同一机房 IP 形成密集请求
+                被风控识别为"账号簇"。
+        """
         logger.info(f"【{cookie_id}】_run_xianyu方法开始执行...")
+
+        if start_delay and start_delay > 0:
+            logger.info(f"【{cookie_id}】错峰启动，延迟 {start_delay:.1f}s 后再上线")
+            try:
+                await asyncio.sleep(start_delay)
+            except asyncio.CancelledError:
+                logger.info(f"【{cookie_id}】错峰等待期间任务被取消")
+                return
 
         try:
             logger.info(f"【{cookie_id}】正在导入XianyuLive...")
@@ -288,15 +302,61 @@ class CookieManager:
             # 如果账号正在运行，通知XianyuLive实例更新设置
             if cookie_id in self.tasks and not self.tasks[cookie_id].done():
                 # 这里可以通过某种方式通知正在运行的XianyuLive实例
-                # 由于XianyuLive会从数据库读取设置，所以数据库已经更新就足够了
-                logger.info(f"账号 {cookie_id} 正在运行，自动确认发货设置已实时生效")
+                pass
         except Exception as e:
-            logger.error(f"更新自动确认发货设置失败: {cookie_id}, {e}")
+            logger.error(f"更新自动确认发货设置失败({cookie_id}): {e}")
 
-    def get_auto_confirm_setting(self, cookie_id: str) -> bool:
-        """获取账号的自动确认发货设置"""
-        return self.auto_confirm_settings.get(cookie_id, True)  # 默认开启
+    # ------------------------ 按系统用户批量启停任务 ------------------------
+    def _list_cookies_for_user(self, user_id: int) -> List[str]:
+        """返回属于指定系统用户的全部 cookie_id 列表"""
+        try:
+            user_cookies = db_manager.get_all_cookies(user_id)
+            return list(user_cookies.keys())
+        except Exception as e:
+            logger.error(f"获取用户 {user_id} 的Cookie列表失败: {e}")
+            return []
+
+    def stop_tasks_for_user(self, user_id: int) -> int:
+        """暂停某系统用户名下所有闲鱼账号任务（多用户系统中该用户到期时调用）
+
+        说明：仅停止运行中的任务，不修改 cookie 启用/禁用状态。
+              用户续期/延期后调用 start_tasks_for_user 即可恢复。
+        Returns: 实际停止的任务数量
+        """
+        cookie_ids = self._list_cookies_for_user(user_id)
+        stopped = 0
+        for cid in cookie_ids:
+            if cid in self.tasks and not self.tasks[cid].done():
+                try:
+                    self._stop_cookie_task(cid)
+                    stopped += 1
+                except Exception as e:
+                    logger.error(f"停止任务失败({cid}): {e}")
+        if stopped:
+            logger.warning(f"用户已到期，已暂停 user_id={user_id} 名下 {stopped} 个账号任务")
+        return stopped
+
+    def start_tasks_for_user(self, user_id: int) -> int:
+        """重启某系统用户名下所有"启用中"的闲鱼账号任务（到期续费后调用）
+
+        Returns: 实际启动的任务数量
+        """
+        cookie_ids = self._list_cookies_for_user(user_id)
+        started = 0
+        for cid in cookie_ids:
+            if not self.cookie_status.get(cid, True):
+                continue  # 用户主动禁用的账号不自动恢复
+            if cid in self.tasks and not self.tasks[cid].done():
+                continue  # 已在运行
+            try:
+                self._start_cookie_task(cid)
+                started += 1
+            except Exception as e:
+                logger.error(f"启动任务失败({cid}): {e}")
+        if started:
+            logger.info(f"已恢复 user_id={user_id} 名下 {started} 个账号任务")
+        return started
 
 
 # 在 Start.py 中会把此变量赋值为具体实例
-manager: Optional[CookieManager] = None 
+manager: Optional[CookieManager] = None

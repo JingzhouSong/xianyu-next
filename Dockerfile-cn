@@ -4,7 +4,7 @@ FROM python:3.11-slim
 # 设置标签信息
 LABEL maintainer="zhinianboke"
 LABEL version="2.1.0"
-LABEL description="闲鱼自动回复系统 - 企业级多用户版本，支持自动发货和免拼发货"
+LABEL description="闲鱼管理系统 - 企业级多用户版本，支持自动发货和免拼发货"
 LABEL repository="https://github.com/zhinianboke/xianyu-auto-reply"
 LABEL license="仅供学习使用，禁止商业用途"
 LABEL author="zhinianboke"

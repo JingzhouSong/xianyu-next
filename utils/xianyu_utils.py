@@ -83,7 +83,7 @@ def generate_uuid() -> str:
 
 
 def generate_device_id(user_id: str) -> str:
-    """生成设备ID"""
+    """生成设备ID（一次性随机；建议持久化到数据库后复用，不要每次启动重新生成）。"""
     import random
     
     # 字符集
@@ -105,6 +105,30 @@ def generate_device_id(user_id: str) -> str:
                 result.append(chars[rand_val])
     
     return ''.join(result) + "-" + user_id
+
+
+def generate_umid() -> str:
+    """生成 umid（设备唯一标识）。
+    长度/字符集参考真实 web 端 umid 的特征：约 100 个 hex 字符的字符串。
+    注意：这只是"看起来合法"的占位值，无法通过阿里风控的真正算法校验，
+    但比完全不带这个头要好——至少在被动校验环节可以减少明显异常特征。
+    建议每个账号首次随机生成后**持久化复用**，不要每次启动都换。
+    """
+    import secrets
+    return secrets.token_hex(50)  # 100 hex chars
+
+
+def generate_x_mini_wua() -> str:
+    """生成 x-mini-wua（mtop 反爬头之一）。
+    真实算法不可逆向且依赖 SDK；这里返回一个看起来合法的 base64-like 字符串作为占位，
+    比缺失该头要好。同样建议持久化复用。
+    """
+    import secrets
+    import base64
+    raw = secrets.token_bytes(120)
+    s = base64.b64encode(raw).decode('ascii').rstrip('=')
+    # 真实 x-mini-wua 通常以特定前缀分段，加一个常见的版本前缀让其更像真实值
+    return f"v3@{s}"
 
 
 def generate_sign(t: str, token: str, data: str) -> str:

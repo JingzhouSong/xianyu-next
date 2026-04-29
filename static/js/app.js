@@ -1092,20 +1092,31 @@ async function loadCookies() {
         const autoConfirm = cookie.auto_confirm === undefined ? true : cookie.auto_confirm;
 
         // 风控状态徽章
+        // - 有 captcha_url：触发了滑块验证 / 风控验证码挑战 → 显示"需验证 + 如何过验证"
+        // - 无 captcha_url：其它 token 刷新失败（如 ILLEGAL_REQUEST、网络异常等）→ 显示"需关注"
         const risk = cookie.risk_status;
-        const riskBadge = risk ? `
-            <div class="mt-1">
-              <span class="badge bg-danger" title="${(risk.error_message||'').replace(/"/g,'&quot;')}">
-                <i class="bi bi-exclamation-triangle-fill"></i> 需验证
-              </span>
-              <button class="btn btn-sm btn-warning py-0 px-1 ms-1" onclick="showCaptchaHelp('${cookie.id}')" title="查看如何在浏览器完成滑块验证">
-                <i class="bi bi-shield-check"></i> 如何过验证
-              </button>
-              <button class="btn btn-sm btn-outline-secondary py-0 px-1 ms-1" onclick="clearCookieRisk('${cookie.id}')" title="若你已在浏览器完成验证或已替换最新Cookie，点击此按钮清除标记">
-                <i class="bi bi-check2-circle"></i> 标记已完成
-              </button>
-              <small class="text-muted d-block mt-1">${risk.detected_at || ''}</small>
-            </div>` : '';
+        let riskBadge = '';
+        if (risk) {
+            const errMsg = (risk.error_message || '').toString().replace(/"/g, '&quot;');
+            const isCaptcha = !!risk.captcha_url;
+            const labelBadge = isCaptcha
+                ? `<span class="badge bg-danger" title="${errMsg}"><i class="bi bi-exclamation-triangle-fill"></i> 需验证</span>`
+                : `<span class="badge bg-warning text-dark" title="${errMsg}"><i class="bi bi-exclamation-circle-fill"></i> 需关注</span>`;
+            const helpBtn = isCaptcha
+                ? `<button class="btn btn-sm btn-warning py-0 px-1 ms-1" onclick="showCaptchaHelp('${cookie.id}')" title="查看如何在浏览器完成滑块验证">
+                     <i class="bi bi-shield-check"></i> 如何过验证
+                   </button>`
+                : '';
+            riskBadge = `
+              <div class="mt-1">
+                ${labelBadge}
+                ${helpBtn}
+                <button class="btn btn-sm btn-outline-secondary py-0 px-1 ms-1" onclick="clearCookieRisk('${cookie.id}')" title="确认已处理后点击清除标记">
+                  <i class="bi bi-check2-circle"></i> 标记已完成
+                </button>
+                <small class="text-muted d-block mt-1">${risk.detected_at || ''}${!isCaptcha && errMsg ? ' · ' + escapeHtml(errMsg.substring(0, 80)) : ''}</small>
+              </div>`;
+        }
 
         // 备注徽章/编辑
         const aliasText = (cookie.alias || '').toString();
@@ -1828,12 +1839,60 @@ async function logout() {
     }
 }
 
+// 显示账号到期横幅（持久顶部提示）
+function showExpiryBanner(expiresAt, customMessage) {
+    // 移除已存在的横幅，避免重复
+    const old = document.getElementById('userExpiredBanner');
+    if (old) old.remove();
+
+    let expiredAtText = '';
+    try {
+        if (expiresAt) {
+            const d = new Date(expiresAt * 1000);
+            const pad = n => String(n).padStart(2, '0');
+            expiredAtText = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        }
+    } catch (_) {}
+
+    const banner = document.createElement('div');
+    banner.id = 'userExpiredBanner';
+    banner.className = 'alert alert-danger alert-dismissible fade show m-0 rounded-0 border-0';
+    banner.style.cssText = 'position:sticky; top:0; z-index:1080; box-shadow:0 2px 8px rgba(220,53,69,.25);';
+    banner.innerHTML = `
+        <div class="d-flex align-items-center">
+            <i class="bi bi-exclamation-octagon-fill fs-4 me-2"></i>
+            <div class="flex-grow-1">
+                <strong>账号已到期</strong>
+                ${expiredAtText ? `<span class="ms-2 small">（到期时间：${expiredAtText}）</span>` : ''}
+                <div class="small mt-1">
+                    ${customMessage ? customMessage.replace(/</g, '&lt;') : '您名下所有闲鱼账号任务（消息监听 / 自动回复 / 自动发货）已被自动暂停。'}
+                    续期后任务会自动恢复，请联系管理员开通。
+                </div>
+            </div>
+        </div>
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+    `;
+    // 插入到 body 顶部，覆盖任何布局
+    document.body.insertBefore(banner, document.body.firstChild);
+}
+
 // 检查认证状态
 async function checkAuth() {
     if (!authToken) {
     window.location.href = '/';
     return false;
     }
+
+    // 登录页写入的过期提示，优先即时显示（即使 /verify 还没返回）
+    try {
+        const noticeRaw = localStorage.getItem('expiry_notice');
+        if (noticeRaw) {
+            const notice = JSON.parse(noticeRaw);
+            if (notice && notice.expired) {
+                showExpiryBanner(notice.expires_at, notice.message);
+            }
+        }
+    } catch (_) {}
 
     try {
     const response = await fetch('/verify', {
@@ -1845,8 +1904,25 @@ async function checkAuth() {
 
     if (!result.authenticated) {
         localStorage.removeItem('auth_token');
+        localStorage.removeItem('expiry_notice');
         window.location.href = '/';
         return false;
+    }
+
+    // 根据后端最新状态同步过期横幅
+    if (result.expired) {
+        showExpiryBanner(result.expires_at);
+        try {
+            localStorage.setItem('expiry_notice', JSON.stringify({
+                expired: true,
+                expires_at: result.expires_at || null
+            }));
+        } catch (_) {}
+    } else {
+        // 未到期则清除横幅与本地标记（管理员续期后即可消除）
+        const banner = document.getElementById('userExpiredBanner');
+        if (banner) banner.remove();
+        localStorage.removeItem('expiry_notice');
     }
 
     // 检查是否为管理员，显示管理员菜单和功能
@@ -3828,9 +3904,43 @@ async function saveCard() {
 }
 // ==================== 自动发货功能 ====================
 
+// 商品ID -> { cookie_id, item_title } 的映射，供发货规则展示所属账号使用
+let itemsLookupMap = {};
+
+// 加载所有商品，构建 item_id -> {cookie_id, item_title} 映射
+async function loadItemsLookupMap() {
+    try {
+        const resp = await fetch(`${apiBase}/items`, {
+            headers: { 'Authorization': `Bearer ${authToken}` }
+        });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        // 兼容两种返回结构：数组 或 { items: [...] }
+        const items = Array.isArray(data) ? data : (data && Array.isArray(data.items) ? data.items : []);
+        const map = {};
+        items.forEach(it => {
+            if (it && it.item_id) {
+                map[it.item_id] = {
+                    cookie_id: it.cookie_id || '',
+                    item_title: it.item_title || ''
+                };
+            }
+        });
+        itemsLookupMap = map;
+    } catch (e) {
+        console.error('加载商品映射失败:', e);
+    }
+}
+
 // 加载发货规则列表
 async function loadDeliveryRules() {
     try {
+    // 先加载账号备注 + 商品映射，保证渲染时所属账号信息可用
+    if (Object.keys(cookieAliasMap || {}).length === 0) {
+        try { await loadCookieFilter(); } catch (_) {}
+    }
+    await loadItemsLookupMap();
+
     const response = await fetch(`${apiBase}/delivery-rules`, {
         headers: {
         'Authorization': `Bearer ${authToken}`
@@ -3860,7 +3970,7 @@ function renderDeliveryRulesList(rules) {
     if (rules.length === 0) {
     tbody.innerHTML = `
         <tr>
-        <td colspan="7" class="text-center py-4 text-muted">
+        <td colspan="8" class="text-center py-4 text-muted">
             <i class="bi bi-truck fs-1 d-block mb-3"></i>
             <h5>暂无发货规则</h5>
             <p class="mb-0">点击"添加规则"开始配置自动发货规则</p>
@@ -3899,7 +4009,24 @@ function renderDeliveryRulesList(rules) {
         }
     }
 
+    // 所属账号信息：仅当规则绑定了 item_id 且能在商品映射中找到时显示
+    let ownerCell = '<span class="text-muted small"><i class="bi bi-dash-circle"></i> 通用规则</span>';
+    if (rule.item_id) {
+        const owner = itemsLookupMap[rule.item_id];
+        if (owner && owner.cookie_id) {
+            const aliasTxt = (cookieAliasMap && cookieAliasMap[owner.cookie_id]) || '';
+            ownerCell = `
+                <div class="fw-semibold"><i class="bi bi-person-circle me-1"></i>${escapeHtml(owner.cookie_id)}</div>
+                ${aliasTxt ? `<span class="badge bg-info text-dark mt-1" title="备注"><i class="bi bi-tag-fill me-1"></i>${escapeHtml(aliasTxt)}</span>` : ''}
+                ${owner.item_title ? `<div class="small text-muted text-truncate mt-1" style="max-width: 180px;" title="${escapeHtml(owner.item_title)}">${escapeHtml(owner.item_title)}</div>` : ''}
+            `;
+        } else {
+            ownerCell = `<span class="text-warning small" title="该商品ID未在本系统商品库中找到，可能未抓取或已删除"><i class="bi bi-exclamation-triangle"></i> 未知商品</span>`;
+        }
+    }
+
     tr.innerHTML = `
+        <td>${ownerCell}</td>
         <td>
         ${rule.item_id ? `<div><span class="badge bg-success"><i class="bi bi-bullseye"></i> ID:${rule.item_id}</span></div>` : ''}
         <div class="fw-bold">${rule.keyword}</div>
@@ -4537,12 +4664,26 @@ async function deleteDeliveryRule(ruleId) {
 // ==================== 系统设置功能 ====================
 
 // 主题颜色映射
+// 浓色：原有 5 种，对比度高
+// 淡色：新增低饱和、柔和的莫兰迪/马卡龙色系
 const themeColors = {
+    // 无色（中性灰，纯净黑白风格）
+    none: '#6c757d',
+    // 浓色系
     blue: '#4f46e5',
     green: '#10b981',
     purple: '#8b5cf6',
     red: '#ef4444',
-    orange: '#f59e0b'
+    orange: '#f59e0b',
+    // 淡色系
+    'soft-blue': '#7aa6e8',
+    'soft-green': '#86c8a3',
+    'soft-purple': '#b39ddb',
+    'soft-pink': '#f4a8b8',
+    'soft-peach': '#f4b894',
+    'soft-mint': '#9ad7c8',
+    'soft-lavender': '#c5b8e0',
+    'soft-sand': '#d4b896'
 };
 
 // 加载用户设置
@@ -4559,13 +4700,54 @@ async function loadUserSettings() {
 
         // 设置主题颜色
         if (settings.theme_color && settings.theme_color.value) {
-        document.getElementById('themeColor').value = settings.theme_color.value;
+        const colorSel = document.getElementById('themeColor');
+        if (colorSel) colorSel.value = settings.theme_color.value;
         applyThemeColor(settings.theme_color.value);
         }
+
+        // 外观模式（浅色 / 深色 / 跟随系统）
+        const mode = (settings.theme_mode && settings.theme_mode.value) || 'auto';
+        const modeSel = document.getElementById('themeMode');
+        if (modeSel) modeSel.value = mode;
+        applyThemeMode(mode);
+    } else {
+        // 未登录或加载失败时，仍按本地缓存或默认 auto 应用一次
+        applyThemeMode(localStorage.getItem('theme_mode') || 'auto');
     }
     } catch (error) {
     console.error('加载用户设置失败:', error);
+    applyThemeMode(localStorage.getItem('theme_mode') || 'auto');
     }
+}
+
+// 应用外观模式：light / dark / auto（跟随系统）
+// 利用 Bootstrap 5.3 的 data-bs-theme 属性切换浅/深色
+let _systemThemeMql = null;
+function applyThemeMode(mode) {
+    const html = document.documentElement;
+    // 清理之前的系统监听器，避免重复绑定
+    if (_systemThemeMql && _systemThemeMql._handler) {
+        try { _systemThemeMql.removeEventListener('change', _systemThemeMql._handler); } catch (_) {}
+        _systemThemeMql = null;
+    }
+
+    const setAttr = (m) => {
+        if (m === 'dark') html.setAttribute('data-bs-theme', 'dark');
+        else html.setAttribute('data-bs-theme', 'light');
+    };
+
+    if (mode === 'auto') {
+        const mql = window.matchMedia('(prefers-color-scheme: dark)');
+        setAttr(mql.matches ? 'dark' : 'light');
+        const handler = (e) => setAttr(e.matches ? 'dark' : 'light');
+        mql.addEventListener('change', handler);
+        mql._handler = handler;
+        _systemThemeMql = mql;
+    } else {
+        setAttr(mode === 'dark' ? 'dark' : 'light');
+    }
+    // 写入本地缓存，保证下次进入页面时尽快生效
+    try { localStorage.setItem('theme_mode', mode); } catch (_) {}
 }
 
 // 应用主题颜色
@@ -4581,6 +4763,10 @@ function applyThemeColor(colorName) {
     // 计算浅色版本（用于某些UI元素）
     const lightColor = adjustBrightness(color, 10);
     document.documentElement.style.setProperty('--primary-light', lightColor);
+
+    // 同步更新设置页的颜色预览块
+    const swatch = document.getElementById('themeColorSwatch');
+    if (swatch) swatch.style.background = color;
     }
 }
 
@@ -4598,32 +4784,58 @@ function adjustBrightness(hex, percent) {
 
 // 主题表单提交处理
 document.addEventListener('DOMContentLoaded', function() {
+    // 主题颜色实时预览：选中即应用，无需点击"应用主题"按钮
+    const colorSel = document.getElementById('themeColor');
+    if (colorSel) {
+        colorSel.addEventListener('change', function() {
+            applyThemeColor(this.value);
+        });
+    }
+    // 外观模式实时预览
+    const modeSelLive = document.getElementById('themeMode');
+    if (modeSelLive) {
+        modeSelLive.addEventListener('change', function() {
+            applyThemeMode(this.value);
+        });
+    }
+
     const themeForm = document.getElementById('themeForm');
     if (themeForm) {
     themeForm.addEventListener('submit', async function(e) {
         e.preventDefault();
 
         const selectedColor = document.getElementById('themeColor').value;
+        const modeSel = document.getElementById('themeMode');
+        const selectedMode = modeSel ? modeSel.value : 'auto';
 
         try {
-        const response = await fetch(`${apiBase}/user-settings/theme_color`, {
-            method: 'PUT',
-            headers: {
-            'Authorization': `Bearer ${authToken}`,
-            'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-            value: selectedColor,
-            description: '主题颜色'
+        // 并发保存：主题颜色 + 外观模式
+        const [colorResp, modeResp] = await Promise.all([
+            fetch(`${apiBase}/user-settings/theme_color`, {
+                method: 'PUT',
+                headers: {
+                    'Authorization': `Bearer ${authToken}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ value: selectedColor, description: '主题颜色' })
+            }),
+            fetch(`${apiBase}/user-settings/theme_mode`, {
+                method: 'PUT',
+                headers: {
+                    'Authorization': `Bearer ${authToken}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ value: selectedMode, description: '外观模式(light/dark/auto)' })
             })
-        });
+        ]);
 
-        if (response.ok) {
+        if (colorResp.ok && modeResp.ok) {
             applyThemeColor(selectedColor);
-            showToast('主题颜色应用成功', 'success');
+            applyThemeMode(selectedMode);
+            showToast('主题应用成功', 'success');
         } else {
-            const error = await response.text();
-            showToast(`主题设置失败: ${error}`, 'danger');
+            const errMsg = !colorResp.ok ? await colorResp.text() : await modeResp.text();
+            showToast(`主题设置失败: ${errMsg}`, 'danger');
         }
         } catch (error) {
         console.error('主题设置失败:', error);
@@ -5225,6 +5437,62 @@ async function loadItemsByCookie() {
     }
 }
 
+// 从商品记录中尽力提取主图 URL
+// item_detail 是从平台获取的 JSON 字符串，包含 pic_info.picUrl 等字段
+function extractItemImageUrl(item) {
+    try {
+        if (!item) return '';
+        // 优先使用数据库中独立保存的图片 URL（避免被第三方详情接口覆盖后丢失）
+        if (item.item_image_url) return String(item.item_image_url);
+        if (item.item_image) return String(item.item_image);
+        if (!item.item_detail) return '';
+
+        let detail = item.item_detail;
+        if (typeof detail === 'string') {
+            const s = detail.trim();
+            if (!s.startsWith('{') && !s.startsWith('[')) return '';
+            try { detail = JSON.parse(s); } catch (_) { return ''; }
+        }
+        if (!detail || typeof detail !== 'object') return '';
+
+        // 常见字段位置
+        const candidates = [
+            detail.pic_info && detail.pic_info.picUrl,
+            detail.picInfo && detail.picInfo.picUrl,
+            detail.picUrl,
+            detail.mainPic,
+            detail.image_url,
+            detail.imageUrl,
+            Array.isArray(detail.images) && detail.images[0],
+            Array.isArray(detail.pics) && detail.pics[0],
+            detail.itemMainPic,
+        ];
+        for (const c of candidates) {
+            if (typeof c === 'string' && c) {
+                // 平台 CDN 偶尔返回 //xxx 协议相对地址，补一下 https
+                return c.startsWith('//') ? 'https:' + c : c;
+            }
+        }
+        return '';
+    } catch (e) {
+        return '';
+    }
+}
+
+// 商品图片预览：在简单的全屏遮罩中显示大图
+function showItemImagePreview(url) {
+    if (!url) return;
+    let mask = document.getElementById('itemImagePreviewMask');
+    if (!mask) {
+        mask = document.createElement('div');
+        mask.id = 'itemImagePreviewMask';
+        mask.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;z-index:2000;cursor:zoom-out;';
+        mask.addEventListener('click', () => mask.remove());
+        document.body.appendChild(mask);
+    }
+    mask.innerHTML = `<img src="${url}" referrerpolicy="no-referrer" style="max-width:90vw;max-height:90vh;border-radius:8px;box-shadow:0 4px 24px rgba(0,0,0,0.4);">`;
+}
+
 // 显示商品列表
 function displayItems(items) {
     const tbody = document.getElementById('itemsTableBody');
@@ -5247,6 +5515,9 @@ function displayItems(items) {
     if (itemTitleDisplay.length > 30) {
         itemTitleDisplay = itemTitleDisplay.substring(0, 30) + '...';
     }
+
+    // 从 item_detail JSON 中尽力提取商品主图 URL
+    const itemImageUrl = extractItemImageUrl(item);
 
     // 处理商品描述显示（与标题同列）
     let itemDescDisplay = '';
@@ -5308,10 +5579,25 @@ function displayItems(items) {
         ${itemPriceDisplay ? `<small class="text-danger fw-bold mt-1 d-block"><i class="bi bi-currency-yen"></i> ${escapeHtml(itemPriceDisplay)}</small>` : ''}
     `;
 
-    // 商品标题 + 描述
+    // 商品标题 + 描述（带商品主图缩略图）
+    const safeImg = itemImageUrl ? escapeHtml(itemImageUrl) : '';
+    const thumbHtml = safeImg
+        ? `<img src="${safeImg}" alt="商品图片" referrerpolicy="no-referrer" loading="lazy"
+                 onclick="showItemImagePreview('${safeImg}')"
+                 onerror="this.style.display='none'"
+                 style="width:48px;height:48px;object-fit:cover;border-radius:6px;border:1px solid #e9ecef;cursor:zoom-in;flex-shrink:0;">`
+        : `<div class="d-flex align-items-center justify-content-center text-muted bg-light"
+                 style="width:48px;height:48px;border-radius:6px;border:1px solid #e9ecef;flex-shrink:0;">
+                <i class="bi bi-image"></i>
+              </div>`;
     const titleCell = `
-        <div class="fw-semibold" title="${escapeHtml(item.item_title || '未设置')}">${escapeHtml(itemTitleDisplay)}</div>
-        ${itemDescDisplay ? `<small class="text-muted d-block" title="${escapeHtml(item.item_description || '')}">${escapeHtml(itemDescDisplay)}</small>` : ''}
+        <div class="d-flex align-items-start gap-2">
+          ${thumbHtml}
+          <div class="flex-grow-1 min-w-0">
+            <div class="fw-semibold" title="${escapeHtml(item.item_title || '未设置')}">${escapeHtml(itemTitleDisplay)}</div>
+            ${itemDescDisplay ? `<small class="text-muted d-block" title="${escapeHtml(item.item_description || '')}">${escapeHtml(itemDescDisplay)}</small>` : ''}
+          </div>
+        </div>
     `;
 
     return `

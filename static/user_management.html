@@ -3,9 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>用户管理 - 闲鱼自动回复系统</title>
+    <title>用户管理 - 闲鱼管理系统</title>
     <link href="/static/lib/bootstrap/bootstrap.min.css" rel="stylesheet">
     <link href="/static/lib/bootstrap-icons/bootstrap-icons.css" rel="stylesheet">
+    <script>(function(){try{var m=localStorage.getItem('theme_mode')||'auto';var r=m==='auto'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):m;document.documentElement.setAttribute('data-bs-theme',r==='dark'?'dark':'light');}catch(e){}})();</script>
     <style>
         .admin-header {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
@@ -15,6 +16,41 @@
         }
         .user-card {
             border: 1px solid #e0e0e0;
+        }
+        /* 用户列表表格样式 */
+        .user-list-table {
+            font-size: 0.92rem;
+        }
+        .user-list-table thead th {
+            font-weight: 600;
+            font-size: 0.82rem;
+            color: #495057;
+            text-transform: none;
+            border-bottom: 2px solid #dee2e6;
+            white-space: nowrap;
+        }
+        .user-list-table tbody td {
+            vertical-align: middle;
+        }
+        .user-list-table tbody tr:hover {
+            background-color: #f8f9fc;
+        }
+        .user-list-table code {
+            background: #f1f3f5;
+            color: #495057;
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 0.78rem;
+        }
+        .user-avatar {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.1rem;
+            flex-shrink: 0;
         }
         .stats-card {
             background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
@@ -32,7 +68,7 @@
     <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
         <div class="container">
             <a class="navbar-brand" href="/">
-                <i class="bi bi-robot"></i> 闲鱼自动回复系统
+                <i class="bi bi-robot"></i> 闲鱼管理系统
             </a>
             <div class="navbar-nav ms-auto">
                 <a class="nav-link" href="/">
@@ -141,14 +177,30 @@
                     <i class="bi bi-arrow-clockwise"></i> 刷新
                 </button>
             </div>
-            <div class="card-body">
+            <div class="card-body p-0">
                 <div id="loadingUsers" class="text-center py-4">
                     <div class="spinner-border" role="status">
                         <span class="visually-hidden">加载中...</span>
                     </div>
                     <p class="mt-2">正在加载用户信息...</p>
                 </div>
-                <div id="usersList" class="row" style="display: none;"></div>
+                <div id="usersList" class="table-responsive" style="display: none;">
+                    <table class="table table-hover align-middle mb-0 user-list-table">
+                        <thead class="table-light">
+                            <tr>
+                                <th style="min-width: 180px;">用户</th>
+                                <th style="min-width: 180px;">邮箱</th>
+                                <th>注册IP</th>
+                                <th class="text-center" title="该用户名下的闲鱼账号数">Cookie</th>
+                                <th class="text-center" title="该用户名下的卡券数">卡券</th>
+                                <th style="min-width: 150px;">注册时间</th>
+                                <th style="min-width: 200px;">权益到期</th>
+                                <th class="text-end" style="min-width: 230px;">操作</th>
+                            </tr>
+                        </thead>
+                        <tbody id="usersTbody"></tbody>
+                    </table>
+                </div>
                 <div id="noUsers" class="text-center py-4" style="display: none;">
                     <i class="bi bi-people" style="font-size: 3rem; color: #ccc;"></i>
                     <p class="mt-2 text-muted">暂无用户</p>
@@ -415,98 +467,97 @@
             });
         }
 
-        // 显示用户列表
+        // 显示用户列表（表格行）
         function displayUsers(users) {
-            const usersListDiv = document.getElementById('usersList');
-            usersListDiv.innerHTML = '';
-            
+            const tbody = document.getElementById('usersTbody');
+            tbody.innerHTML = '';
             users.forEach(user => {
-                const userCard = createUserCard(user);
-                usersListDiv.appendChild(userCard);
+                tbody.appendChild(createUserRow(user));
             });
         }
 
-        // 创建用户卡片
-        function createUserCard(user) {
-            const col = document.createElement('div');
-            col.className = 'col-md-6 col-lg-4 mb-3';
-            
+        // HTML 转义
+        function escHtml(s) {
+            if (s == null) return '';
+            return String(s)
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
+
+        // 创建用户表格行
+        function createUserRow(user) {
+            const tr = document.createElement('tr');
             const isAdmin = user.username === 'admin';
-            const badgeClass = isAdmin ? 'bg-danger' : 'bg-primary';
-            const badgeText = isAdmin ? '管理员' : '普通用户';
-            
-            // 计算到期状态
+
+            // 行级状态高亮
             const now = Date.now() / 1000;
             const exp = user.expires_at;
+            let rowCls = '';
             let expiryHtml;
             if (isAdmin) {
                 expiryHtml = `<span class="badge bg-danger"><i class="bi bi-infinity"></i> 永久（管理员）</span>`;
             } else if (exp == null) {
-                expiryHtml = `<span class="badge bg-secondary">未设置（永久）</span>`;
+                expiryHtml = `<span class="badge bg-secondary"><i class="bi bi-infinity"></i> 未设置（永久）</span>`;
             } else if (exp <= now) {
-                expiryHtml = `<span class="badge bg-warning text-dark">已到期 · ${formatDate(new Date(exp * 1000))}</span>`;
+                rowCls = 'table-danger';
+                expiryHtml = `
+                    <span class="badge bg-danger"><i class="bi bi-x-octagon-fill"></i> 已到期</span>
+                    <div class="small text-muted mt-1">${formatDate(new Date(exp * 1000))}</div>`;
             } else {
                 const daysLeft = Math.ceil((exp - now) / 86400);
-                const cls = daysLeft <= 3 ? 'bg-warning text-dark' : 'bg-success';
-                expiryHtml = `<span class="badge ${cls}"><i class="bi bi-clock"></i> 剩 ${daysLeft} 天 · ${formatDate(new Date(exp * 1000))}</span>`;
+                let cls = 'bg-success';
+                if (daysLeft <= 3) {
+                    cls = 'bg-warning text-dark';
+                    rowCls = 'table-warning';
+                } else if (daysLeft <= 7) {
+                    cls = 'bg-info text-dark';
+                }
+                expiryHtml = `
+                    <span class="badge ${cls}"><i class="bi bi-clock"></i> 剩 ${daysLeft} 天</span>
+                    <div class="small text-muted mt-1">${formatDate(new Date(exp * 1000))}</div>`;
             }
+            if (rowCls) tr.className = rowCls;
 
-            col.innerHTML = `
-                <div class="card user-card h-100">
-                    <div class="card-body">
-                        <div class="d-flex justify-content-between align-items-start mb-2">
-                            <h6 class="card-title mb-0">
-                                <i class="bi bi-person-circle"></i> ${user.username}
-                            </h6>
-                            <span class="badge ${badgeClass}">${badgeText}</span>
+            const userJson = JSON.stringify(user).replace(/'/g, '&#39;');
+            const roleBadge = isAdmin
+                ? `<span class="badge bg-danger ms-1" title="管理员">管理员</span>`
+                : '';
+
+            tr.innerHTML = `
+                <td>
+                    <div class="d-flex align-items-center">
+                        <div class="user-avatar bg-${isAdmin ? 'danger' : 'primary'} bg-opacity-10 text-${isAdmin ? 'danger' : 'primary'}">
+                            <i class="bi bi-person-fill"></i>
                         </div>
-                        <p class="card-text text-muted small mb-1">
-                            <i class="bi bi-envelope"></i> ${user.email || '-'}
-                        </p>
-                        <p class="card-text text-muted small mb-2">
-                            <i class="bi bi-globe"></i> 注册IP：<code>${user.register_ip || '-'}</code>
-                        </p>
-                        <div class="row text-center mb-3">
-                            <div class="col">
-                                <small class="text-muted">Cookie数</small>
-                                <div class="fw-bold">${user.cookie_count || 0}</div>
-                            </div>
-                            <div class="col">
-                                <small class="text-muted">卡券数</small>
-                                <div class="fw-bold">${user.card_count || 0}</div>
-                            </div>
+                        <div class="ms-2">
+                            <div class="fw-semibold">${escHtml(user.username)}${roleBadge}</div>
+                            <div class="small text-muted">ID: ${user.id}</div>
                         </div>
-                        <div class="text-muted small mb-1">
-                            <i class="bi bi-calendar"></i> 注册时间：${formatDate(user.created_at)}
-                        </div>
-                        <div class="mb-3">
-                            <small class="text-muted d-block mb-1"><i class="bi bi-hourglass-split"></i> 权益到期</small>
-                            ${expiryHtml}
-                        </div>
-                        ${!isAdmin ? `
-                        <div class="d-grid gap-2">
-                            <button class="btn btn-success btn-sm" onclick='openGrantModal(${JSON.stringify(user)})'>
-                                <i class="bi bi-gift"></i> 发放/续期权益
-                            </button>
-                            <button class="btn btn-outline-secondary btn-sm" onclick='openExpiryEditor(${JSON.stringify(user)})'>
-                                <i class="bi bi-pencil"></i> 直接修改到期
-                            </button>
-                            <button class="btn btn-danger-custom btn-sm" onclick="deleteUser(${user.id}, '${user.username}')">
-                                <i class="bi bi-trash"></i> 删除用户
-                            </button>
-                        </div>
-                        ` : `
-                        <div class="text-center">
-                            <small class="text-muted">
-                                <i class="bi bi-shield-check"></i> 管理员账号不可删除
-                            </small>
-                        </div>
-                        `}
                     </div>
-                </div>
+                </td>
+                <td class="small">${user.email ? `<i class="bi bi-envelope text-muted"></i> ${escHtml(user.email)}` : '<span class="text-muted">-</span>'}</td>
+                <td class="small"><code>${escHtml(user.register_ip || '-')}</code></td>
+                <td class="text-center"><span class="badge bg-light text-dark border">${user.cookie_count || 0}</span></td>
+                <td class="text-center"><span class="badge bg-light text-dark border">${user.card_count || 0}</span></td>
+                <td class="small text-muted">${formatDate(user.created_at)}</td>
+                <td>${expiryHtml}</td>
+                <td class="text-end">
+                    ${!isAdmin ? `
+                        <div class="btn-group btn-group-sm" role="group">
+                            <button class="btn btn-success" title="发放/续期权益" onclick='openGrantModal(${userJson})'>
+                                <i class="bi bi-gift"></i>
+                            </button>
+                            <button class="btn btn-outline-secondary" title="直接修改到期时间" onclick='openExpiryEditor(${userJson})'>
+                                <i class="bi bi-pencil"></i>
+                            </button>
+                            <button class="btn btn-outline-danger" title="删除用户" onclick="deleteUser(${user.id}, '${escHtml(user.username)}')">
+                                <i class="bi bi-trash"></i>
+                            </button>
+                        </div>
+                    ` : `<small class="text-muted"><i class="bi bi-shield-check"></i> 管理员不可操作</small>`}
+                </td>
             `;
-            
-            return col;
+            return tr;
         }
 
         // 格式化日期

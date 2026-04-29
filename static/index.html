@@ -8,6 +8,20 @@
   <link rel="stylesheet" href="/static/lib/bootstrap-icons/bootstrap-icons.css">
   
   <link rel="stylesheet" href="/static/css/app.css">
+
+  <!-- 提前应用外观模式，避免页面加载时白屏闪烁（FOUC） -->
+  <script>
+    (function () {
+      try {
+        var mode = localStorage.getItem('theme_mode') || 'auto';
+        var resolved = mode;
+        if (mode === 'auto') {
+          resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+        document.documentElement.setAttribute('data-bs-theme', resolved === 'dark' ? 'dark' : 'light');
+      } catch (e) {}
+    })();
+  </script>
 </head>
 <body>
   <!-- 移动端菜单切换按钮 -->
@@ -606,6 +620,7 @@
                   <table class="table table-hover">
                     <thead>
                       <tr>
+                        <th>所属账号</th>
                         <th>商品关键字</th>
                         <th>匹配卡券</th>
                         <th>卡券类型</th>
@@ -617,7 +632,7 @@
                     </thead>
                     <tbody id="deliveryRulesTableBody">
                       <tr>
-                        <td colspan="7" class="text-center py-4 text-muted">
+                        <td colspan="8" class="text-center py-4 text-muted">
                           <i class="bi bi-truck fs-1 d-block mb-3"></i>
                           <h5>暂无发货规则</h5>
                           <p class="mb-0">点击"添加规则"开始配置自动发货规则</p>
@@ -979,12 +994,40 @@
                   <div class="mb-3">
                     <label for="themeColor" class="form-label">主题颜色</label>
                     <select class="form-select" id="themeColor">
-                      <option value="blue">蓝色</option>
-                      <option value="green">绿色</option>
-                      <option value="purple">紫色</option>
-                      <option value="red">红色</option>
-                      <option value="orange">橙色</option>
+                      <option value="none">无色（黑白）</option>
+                      <optgroup label="浓色系">
+                        <option value="blue">蓝色</option>
+                        <option value="green">绿色</option>
+                        <option value="purple">紫色</option>
+                        <option value="red">红色</option>
+                        <option value="orange">橙色</option>
+                      </optgroup>
+                      <optgroup label="淡色系（柔和马卡龙）">
+                        <option value="soft-blue">浅蓝</option>
+                        <option value="soft-green">薄荷绿</option>
+                        <option value="soft-purple">淡紫</option>
+                        <option value="soft-pink">樱花粉</option>
+                        <option value="soft-peach">蜜桃橙</option>
+                        <option value="soft-mint">青瓷</option>
+                        <option value="soft-lavender">薰衣草</option>
+                        <option value="soft-sand">奶咖</option>
+                      </optgroup>
                     </select>
+                    <div class="form-text" id="themeColorPreview">
+                      <span id="themeColorSwatch" style="display:inline-block;width:14px;height:14px;border-radius:3px;border:1px solid rgba(0,0,0,0.1);vertical-align:middle;margin-right:6px;"></span>
+                      <span class="text-muted">点击「应用主题」即可生效</span>
+                    </div>
+                  </div>
+                  <div class="mb-3">
+                    <label for="themeMode" class="form-label">外观模式</label>
+                    <select class="form-select" id="themeMode">
+                      <option value="light">浅色</option>
+                      <option value="dark">深色</option>
+                      <option value="auto" selected>跟随系统</option>
+                    </select>
+                    <div class="form-text">
+                      <i class="bi bi-info-circle"></i> 选择"跟随系统"将根据您操作系统的浅/深色偏好自动切换
+                    </div>
                   </div>
                   <button type="submit" class="btn btn-primary">
                     <i class="bi bi-check-circle me-1"></i>应用主题

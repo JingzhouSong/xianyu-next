@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 """
-闲鱼自动回复系统 PyInstaller 打包配置文件
+闲鱼管理系统 PyInstaller 打包配置文件
 
 用于将 Python 项目打包为独立可执行文件
 """

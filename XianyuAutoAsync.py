@@ -8,7 +8,7 @@ from loguru import logger
 import websockets
 from utils.xianyu_utils import (
     decrypt, generate_mid, generate_uuid, trans_cookies,
-    generate_device_id, generate_sign
+    generate_device_id, generate_sign, generate_umid, generate_x_mini_wua
 )
 from config import (
     WEBSOCKET_URL, HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT,
@@ -105,8 +105,12 @@ class XianyuLive:
 
         self.myid = self.cookies['unb']
         logger.info(f"【{cookie_id}】用户ID: {self.myid}")
-        self.device_id = generate_device_id(self.myid)
-        
+
+        # 加载/初始化持久化设备指纹（device_id / umid / x_mini_wua）
+        # 这些值首次登录时随机生成并写库，整个账号生命周期复用，
+        # 避免每次启动/重启都换新指纹被风控盯上。
+        self._load_or_init_fingerprint()
+
         # 心跳相关配置
         self.heartbeat_interval = HEARTBEAT_INTERVAL
         self.heartbeat_timeout = HEARTBEAT_TIMEOUT
@@ -114,14 +118,27 @@ class XianyuLive:
         self.last_heartbeat_response = 0
         self.heartbeat_task = None
         self.ws = None
-        
-        # Token刷新相关配置
+
+        # Token刷新相关配置（被动模式：只在自然过期或接口报错时才刷）
         self.token_refresh_interval = TOKEN_REFRESH_INTERVAL
         self.token_retry_interval = TOKEN_RETRY_INTERVAL
+        # 被动刷新开关：True 时跳过 token_refresh_loop 的主动刷新逻辑
+        self.passive_token_refresh = bool(config.get('PASSIVE_TOKEN_REFRESH', True))
         self.last_token_refresh_time = 0
         self.current_token = None
         self.token_refresh_task = None
         self.connection_restart_flag = False  # 连接重启标志
+
+        # 从 DB 恢复上次刷新时间，避免每次重启都强制刷新 token
+        try:
+            from db_manager import db_manager
+            tk = db_manager.get_account_token(self.cookie_id)
+            if tk.get('last_token_refresh_time'):
+                self.last_token_refresh_time = float(tk['last_token_refresh_time'])
+                age = time.time() - self.last_token_refresh_time
+                logger.info(f"【{cookie_id}】恢复上次 token 刷新时间，距今 {int(age)}s（阈值 {self.token_refresh_interval}s）")
+        except Exception as _e:
+            logger.debug(f"恢复 token 持久化状态失败: {_e}")
 
         # 通知防重复机制
         self.last_notification_time = {}  # 记录每种通知类型的最后发送时间
@@ -137,6 +154,123 @@ class XianyuLive:
         
 
         self.session = None  # 用于API调用的aiohttp session
+
+    # -------------------- 设备指纹加载/初始化 --------------------
+    def _load_or_init_fingerprint(self):
+        """从 DB 加载持久化的 device_id / umid / x_mini_wua；不存在则随机生成并写库。
+
+        关键点：保证同一账号在多次重启之间使用同一套指纹，模拟"一台真实设备"。
+        """
+        try:
+            from db_manager import db_manager
+            fp = db_manager.get_account_fingerprint(self.cookie_id) or {}
+        except Exception as e:
+            logger.warning(f"【{self.cookie_id}】读取持久化指纹失败，临时生成一次：{self._safe_str(e)}")
+            fp = {}
+
+        device_id = fp.get('device_id')
+        umid = fp.get('umid')
+        x_mini_wua = fp.get('x_mini_wua')
+
+        # 缺失则首次生成
+        new_device_id = device_id or generate_device_id(self.myid)
+        new_umid = umid or generate_umid()
+        new_x_mini_wua = x_mini_wua or generate_x_mini_wua()
+
+        self.device_id = new_device_id
+        self.umid = new_umid
+        self.x_mini_wua = new_x_mini_wua
+
+        # 把首次生成的部分回写
+        try:
+            from db_manager import db_manager
+            to_save = {}
+            if not device_id:
+                to_save['device_id'] = new_device_id
+            if not umid:
+                to_save['umid'] = new_umid
+            if not x_mini_wua:
+                to_save['x_mini_wua'] = new_x_mini_wua
+            if to_save:
+                db_manager.save_account_fingerprint(self.cookie_id, **to_save)
+                logger.info(
+                    f"【{self.cookie_id}】首次生成设备指纹并已持久化："
+                    f"{', '.join(to_save.keys())}"
+                )
+            else:
+                logger.info(f"【{self.cookie_id}】使用已持久化设备指纹（device_id 末段: ...{new_device_id[-12:]})")
+        except Exception as e:
+            logger.warning(f"【{self.cookie_id}】持久化设备指纹失败：{self._safe_str(e)}")
+
+    def _inject_fingerprint_headers(self, headers: dict) -> dict:
+        """把持久化的 umid / x-mini-wua 注入到指定的请求头。
+
+        说明：
+        - 这两个值是占位实现（无法逆向真实算法），但比完全缺失要好；
+        - 单账号长期复用同一份值，符合"一台真实设备"的特征。
+        """
+        try:
+            if getattr(self, 'umid', None):
+                headers.setdefault('umid', self.umid)
+                headers.setdefault('x-umt', self.umid)
+            if getattr(self, 'x_mini_wua', None):
+                headers.setdefault('x-mini-wua', self.x_mini_wua)
+        except Exception:
+            pass
+        return headers
+
+    # -------------------- 风控熔断状态检查 --------------------
+    def is_risk_blocked(self) -> bool:
+        """检查账号是否处于风控状态。
+        若处于风控且未被手动清除，则视为整账号熔断：
+        - WS 主循环跳过重连
+        - 心跳/Token 刷新/商品轮询全部跳过
+        直到管理员在前端"标记已完成"清除标记后才恢复。
+        """
+        try:
+            from db_manager import db_manager
+            risk = db_manager.get_cookie_risk_status(self.cookie_id)
+            return bool(risk)
+        except Exception:
+            return False
+
+    async def _send_risk_reminder_if_due(self):
+        """风控熔断期间周期性推送"手动认证提醒"通知。
+
+        由于熔断后 token_refresh_loop 处于被动模式、WS 主循环也不再重连，
+        原本由 refresh_token 在 captcha 分支触发的提醒不会再被触发。
+        因此这里在主循环的熔断等待分支中，按固定间隔重新推送同一条引导文案，
+        让管理员持续看到"该账号还需要手动处理"。
+
+        间隔配置：global_config.yml -> RISK_REMINDER_INTERVAL（秒），默认 1800（30 分钟）。
+        实际触发频率还会受 send_token_refresh_notification 内部 5 分钟冷却影响。
+        """
+        try:
+            interval = int(config.get('RISK_REMINDER_INTERVAL', 1800))
+        except Exception:
+            interval = 1800
+        now = time.time()
+        last = getattr(self, '_last_risk_reminder_ts', 0)
+        if now - last < max(60, interval):
+            return
+        self._last_risk_reminder_ts = now
+        try:
+            from db_manager import db_manager
+            risk = db_manager.get_cookie_risk_status(self.cookie_id) or {}
+        except Exception:
+            risk = {}
+        ret_text = risk.get('error_message') or risk.get('detected_at') or ''
+        await self.send_token_refresh_notification(
+            (
+                f"账号仍处于风控状态，请尽快手动完成滑块验证：\n"
+                f"1) 在浏览器打开 https://www.goofish.com/ 并登录该账号；\n"
+                f"2) 进入私信或商品页，按提示完成滑块；\n"
+                f"3) 重新导出最新 Cookie 覆盖该账号；\n"
+                f"4) 在管理后台点击\"标记已完成\"清除风控标记。\n"
+                f"原始错误: {ret_text}"
+            ),
+            "token_refresh_captcha"
+        )
 
     def is_auto_confirm_enabled(self) -> bool:
         """检查当前账号是否启用自动确认发货"""
@@ -403,9 +537,12 @@ class XianyuLive:
             params['sign'] = sign
             
             # 发送请求
+            # 注意：mtop login.token 接口对 umid / x-mini-wua 有 SecurityGuard 强校验，
+            # 注入伪造值反而会触发 ILLEGAL_REQUEST / ANTI_SPAM 等更严苛的拒绝，
+            # 因此本接口刻意不调用 _inject_fingerprint_headers，保留干净的 H5 行为。
             headers = DEFAULT_HEADERS.copy()
             headers['cookie'] = self.cookies_str
-            
+
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     API_ENDPOINTS.get('token'),
@@ -441,6 +578,17 @@ class XianyuLive:
                                 self.current_token = new_token
                                 self.last_token_refresh_time = time.time()
                                 logger.info(f"【{self.cookie_id}】Token刷新成功")
+                                # 持久化刷新时间，避免下次重启再次强刷
+                                try:
+                                    from db_manager import db_manager
+                                    db_manager.save_account_token(
+                                        self.cookie_id,
+                                        m_h5_tk=self.cookies.get('_m_h5_tk'),
+                                        m_h5_tk_enc=self.cookies.get('_m_h5_tk_enc'),
+                                        last_token_refresh_time=int(self.last_token_refresh_time),
+                                    )
+                                except Exception as _e:
+                                    logger.debug(f"持久化 token 状态异常: {_e}")
                                 # 成功后清除风控标记
                                 try:
                                     from db_manager import db_manager
@@ -476,14 +624,40 @@ class XianyuLive:
                         )
                         return None
 
+                    # 兜底：非 captcha 类的其它失败（如 ILLEGAL_REQUEST / FAIL_SYS_TOKEN_EMPTY 等）
+                    # 也写一条 risk_status，让前端账号列表能立刻看到"该账号需要关注"，
+                    # 便于管理员人工排查；用户在前端"标记已完成"或下次成功刷新时会自动清除。
+                    ret_text_fb = ' | '.join(ret_value) if isinstance(ret_value, list) else str(ret_value)
                     logger.error(f"【{self.cookie_id}】Token刷新失败: {res_json}")
-                    # 发送Token刷新失败通知
+                    try:
+                        from db_manager import db_manager
+                        # 仅当当前没有更高优先级的 captcha 标记时写入，避免覆盖更精准的提示
+                        existing = db_manager.get_cookie_risk_status(self.cookie_id) or {}
+                        if not existing.get('captcha_url'):
+                            db_manager.set_cookie_risk_status(
+                                self.cookie_id,
+                                captcha_url='',
+                                error_message=f"Token刷新失败: {ret_text_fb[:300]}"
+                            )
+                    except Exception as _e:
+                        logger.debug(f"保存兜底风控状态异常: {_e}")
                     await self.send_token_refresh_notification(f"Token刷新失败: {res_json}", "token_refresh_failed")
                     return None
 
         except Exception as e:
             logger.error(f"Token刷新异常: {self._safe_str(e)}")
-            # 发送Token刷新异常通知
+            # 兜底：异常分支也登记，便于在前端看到
+            try:
+                from db_manager import db_manager
+                existing = db_manager.get_cookie_risk_status(self.cookie_id) or {}
+                if not existing.get('captcha_url'):
+                    db_manager.set_cookie_risk_status(
+                        self.cookie_id,
+                        captcha_url='',
+                        error_message=f"Token刷新异常: {str(e)[:300]}"
+                    )
+            except Exception as _e:
+                logger.debug(f"保存兜底风控状态异常: {_e}")
             await self.send_token_refresh_notification(f"Token刷新异常: {str(e)}", "token_refresh_exception")
             return None
 
@@ -603,10 +777,23 @@ class XianyuLive:
             # 使用aiohttp发送异步请求
             import aiohttp
             import asyncio
+            import ssl as _ssl
 
             timeout = aiohttp.ClientTimeout(total=timeout_seconds)
 
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            # 该第三方 API 的 SSL 证书可能已过期/不被信任。
+            # 是否跳过 SSL 校验由配置 ITEM_DETAIL.auto_fetch.verify_ssl 控制，默认 False（跳过）
+            # 仅用于这一个非敏感的"商品文本描述"接口，不影响其它请求。
+            verify_ssl = bool(auto_fetch_config.get('verify_ssl', False))
+            if verify_ssl:
+                ssl_ctx = None  # 使用默认安全校验
+            else:
+                ssl_ctx = _ssl.create_default_context()
+                ssl_ctx.check_hostname = False
+                ssl_ctx.verify_mode = _ssl.CERT_NONE
+            connector = aiohttp.TCPConnector(ssl=ssl_ctx) if ssl_ctx is not None else None
+
+            async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
                 async with session.get(api_url) as response:
                     if response.status == 200:
                         result = await response.json()
@@ -669,6 +856,12 @@ class XianyuLive:
                 existing_item = db_manager.get_item_info(self.cookie_id, item_id)
                 has_detail = existing_item and existing_item.get('item_detail') and existing_item['item_detail'].strip()
 
+                # 提取主图 URL（来自 picInfo.picUrl），单独保存以避免后续 item_detail 被覆盖时丢失
+                pic_info = item.get('pic_info') or {}
+                pic_url = pic_info.get('picUrl', '') if isinstance(pic_info, dict) else ''
+                if isinstance(pic_url, str) and pic_url.startswith('//'):
+                    pic_url = 'https:' + pic_url
+
                 batch_data.append({
                     'cookie_id': self.cookie_id,
                     'item_id': item_id,
@@ -676,7 +869,8 @@ class XianyuLive:
                     'item_description': '',  # 暂时为空
                     'item_category': str(item.get('category_id', '')),
                     'item_price': item.get('price_text', ''),
-                    'item_detail': json.dumps(item_detail, ensure_ascii=False)
+                    'item_detail': json.dumps(item_detail, ensure_ascii=False),
+                    'item_image_url': pic_url,
                 })
 
                 # 如果没有详情，添加到需要获取详情的列表
@@ -2222,19 +2416,49 @@ class XianyuLive:
             return None
 
     async def token_refresh_loop(self):
-        """Token刷新循环"""
-        # 给本进程的 token 刷新阈值加 ±10% 随机抖动，避免多账号/多次重启后形成规律性请求被风控盯上
+        """Token刷新循环。
+
+        被动模式（默认开启，由 config.PASSIVE_TOKEN_REFRESH 控制）：
+        - 不再主动按时间窗口刷新 token；
+        - 仅当 API 调用失败（FAIL_SYS_TOKEN_EXOIRED 等）触发 `get_item_info` 重试时
+          才会调用 refresh_token；
+        - 这样能显著降低对 mtop login.token 接口的主动调用频率，符合真实客户端行为。
+
+        主动模式（兼容旧逻辑）：
+        - 每 token_refresh_interval 秒检查一次；
+        - 同样会做风控熔断检查。
+        """
+        if getattr(self, 'passive_token_refresh', True):
+            logger.info(f"【{self.cookie_id}】Token 刷新已切换到被动模式，仅在接口报错时按需刷新")
+            # 仍然保留循环以做风控熔断观测，但不主动刷新
+            while True:
+                try:
+                    from cookie_manager import manager as cookie_manager
+                    if cookie_manager and not cookie_manager.get_cookie_status(self.cookie_id):
+                        logger.info(f"【{self.cookie_id}】账号已禁用，停止Token刷新循环")
+                        break
+                    await asyncio.sleep(300)
+                except Exception as e:
+                    logger.debug(f"Token 被动循环异常: {self._safe_str(e)}")
+                    await asyncio.sleep(300)
+            return
+
+        # ----- 兼容旧主动刷新逻辑 -----
         import random as _random
         jitter_ratio = 1.0 + _random.uniform(-0.1, 0.1)
         jittered_interval = max(60, int(self.token_refresh_interval * jitter_ratio))
         logger.info(f"【{self.cookie_id}】Token 刷新间隔（含抖动）: {jittered_interval}s（基准 {self.token_refresh_interval}s）")
         while True:
             try:
-                # 检查账号是否启用
                 from cookie_manager import manager as cookie_manager
                 if cookie_manager and not cookie_manager.get_cookie_status(self.cookie_id):
                     logger.info(f"【{self.cookie_id}】账号已禁用，停止Token刷新循环")
                     break
+
+                # 风控熔断：若账号在风控期，跳过主动刷新（refresh_token 内部也有冷却保护，这里多一层快速跳过）
+                if self.is_risk_blocked():
+                    await asyncio.sleep(60)
+                    continue
 
                 current_time = time.time()
                 if current_time - self.last_token_refresh_time >= jittered_interval:
@@ -2248,7 +2472,6 @@ class XianyuLive:
                         break
                     else:
                         logger.error(f"【{self.cookie_id}】Token刷新失败，将在{self.token_retry_interval // 60}分钟后重试")
-                        # 发送Token刷新失败通知
                         await self.send_token_refresh_notification("Token定时刷新失败，将自动重试", "token_scheduled_refresh_failed")
                         await asyncio.sleep(self.token_retry_interval)
                         continue
@@ -2328,6 +2551,9 @@ class XianyuLive:
 
     async def init(self, ws):
         # 如果没有token或者token过期，获取新token
+        # 注：accessToken 必须用于 WS /reg 握手，因此每次新建 WS 连接仍需 refresh_token；
+        # 但 refresh_token 内部会做风控冷却保护，重启后若 last_token_refresh_time 较新，
+        # token_refresh_loop（被动模式）也不会再主动刷，整体调用量已显著降低。
         token_refresh_attempted = False
         if not self.current_token or (time.time() - self.last_token_refresh_time) >= self.token_refresh_interval:
             logger.info(f"【{self.cookie_id}】获取初始token...")
@@ -2398,6 +2624,15 @@ class XianyuLive:
                 from cookie_manager import manager as cookie_manager
                 if cookie_manager and not cookie_manager.get_cookie_status(self.cookie_id):
                     logger.info(f"【{self.cookie_id}】账号已禁用，停止心跳循环")
+                    break
+
+                # 风控熔断：账号在风控期内停止心跳，主动断开 WS 让主循环进入熔断等待
+                if self.is_risk_blocked():
+                    logger.warning(f"【{self.cookie_id}】检测到风控状态，停止心跳并断开 WS 等待人工处理")
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
                     break
 
                 await self.send_heartbeat(ws)
@@ -2538,6 +2773,9 @@ class XianyuLive:
         """创建aiohttp session"""
         if not self.session:
             # 创建带有cookies和headers的session
+            # 注意：本 session 主要发往 mtop 接口（item_info / freeshipping 等），
+            # 同 refresh_token 一样，不注入伪造的 umid / x-mini-wua，
+            # 避免触发 SecurityGuard 严校验。
             headers = DEFAULT_HEADERS.copy()
             headers['cookie'] = self.cookies_str
 
@@ -2993,8 +3231,19 @@ class XianyuLive:
                         logger.info(f"【{self.cookie_id}】账号已禁用，停止主循环")
                         break
 
+                    # 风控熔断：账号处于风控期内不重连，等管理员手动清除后再恢复
+                    if self.is_risk_blocked():
+                        logger.warning(f"【{self.cookie_id}】账号处于风控熔断中，跳过 WS 连接（每 60s 检查一次）")
+                        # 周期性提醒：即使熔断不再调任何 mtop 接口，也要持续提醒管理员
+                        # 处理风控（默认每 30min 一次，受 send_token_refresh_notification
+                        # 自身 5min 冷却保护，所以实际是 max(reminder_interval, 5min)）
+                        await self._send_risk_reminder_if_due()
+                        await asyncio.sleep(60)
+                        continue
+
                     headers = WEBSOCKET_HEADERS.copy()
                     headers['Cookie'] = self.cookies_str
+                    self._inject_fingerprint_headers(headers)
 
                     logger.info(f"【{self.cookie_id}】准备建立WebSocket连接到: {self.base_url}")
                     logger.debug(f"【{self.cookie_id}】WebSocket headers: {headers}")

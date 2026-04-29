@@ -1,4 +1,4 @@
-# 闲鱼自动回复系统
+# 闲鱼管理系统
 
 > **重要提示：本项目采用 AGPLv3 开源协议，请确保遵守开源协议要求**
 
@@ -212,6 +212,9 @@ source venv/bin/activate  # Linux/macOS
 conda create --prefix d:/conda_envs/xianyu python=3.11 -y
 conda activate d:/conda_envs/xianyu
 
+## conda create -n xianyu python=3.11 -y
+## conda activate xianyu
+
 
 # 3. 安装Python依赖
 pip install --upgrade pip
@@ -223,6 +226,7 @@ playwright install-deps chromium  # Linux需要
 
 # 5. 启动系统
 python Start.py
+# nohup python Start.py > output.log 2>&1 &
 
 # 6. 访问系统
 # http://localhost:8080
@@ -592,4 +596,4 @@ powershell -ExecutionPolicy Bypass -File docker-deploy.bat
 
 ---
 
-**开始使用闲鱼自动回复系统，让您的闲鱼店铺管理更加智能高效！**
+**开始使用闲鱼管理系统，让您的闲鱼店铺管理更加智能高效！**

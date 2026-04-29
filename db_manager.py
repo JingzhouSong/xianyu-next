@@ -179,6 +179,26 @@ class DBManager:
                 # 不在 SQLite 层加 UNIQUE（因为按 user_id 维度唯一无法直接表达），改在应用层校验
                 self._execute_sql(cursor, "CREATE INDEX IF NOT EXISTS idx_cookies_alias ON cookies(user_id, alias)")
                 logger.info("cookies 表 alias 列添加完成")
+
+            # 检查并添加设备指纹列（device_id / umid / x_mini_wua）
+            # 这三个值首次登录时随机生成并写库，之后整个账号生命周期复用，
+            # 模拟"一台真实设备"，避免每次启动/重启都换一个 deviceId 让风控察觉。
+            for fp_col in ('device_id', 'umid', 'x_mini_wua'):
+                try:
+                    self._execute_sql(cursor, f"SELECT {fp_col} FROM cookies LIMIT 1")
+                except sqlite3.OperationalError:
+                    logger.info(f"正在为 cookies 表添加 {fp_col} 列...")
+                    self._execute_sql(cursor, f"ALTER TABLE cookies ADD COLUMN {fp_col} TEXT")
+                    logger.info(f"cookies 表 {fp_col} 列添加完成")
+
+            # 检查并添加 token 持久化列（避免每次重启强制刷新 token，触发风控）
+            for tk_col, tk_type in (('m_h5_tk', 'TEXT'), ('m_h5_tk_enc', 'TEXT'), ('last_token_refresh_time', 'INTEGER DEFAULT 0')):
+                try:
+                    self._execute_sql(cursor, f"SELECT {tk_col} FROM cookies LIMIT 1")
+                except sqlite3.OperationalError:
+                    logger.info(f"正在为 cookies 表添加 {tk_col} 列...")
+                    self._execute_sql(cursor, f"ALTER TABLE cookies ADD COLUMN {tk_col} {tk_type}")
+                    logger.info(f"cookies 表 {tk_col} 列添加完成")
             
             # 创建keywords表
             cursor.execute('''
@@ -342,6 +362,15 @@ class DBManager:
                 logger.info("正在为 item_info 表添加 require_confirm_delivery 列...")
                 self._execute_sql(cursor, "ALTER TABLE item_info ADD COLUMN require_confirm_delivery BOOLEAN DEFAULT FALSE")
                 logger.info("item_info 表 require_confirm_delivery 列添加完成")
+
+            # 检查并添加 item_image_url 列（用于在商品列表展示主图缩略图）
+            # 该列独立保存图片 URL，避免后续 item_detail 被第三方详情接口覆盖时丢失图片
+            try:
+                self._execute_sql(cursor, "SELECT item_image_url FROM item_info LIMIT 1")
+            except sqlite3.OperationalError:
+                logger.info("正在为 item_info 表添加 item_image_url 列...")
+                self._execute_sql(cursor, "ALTER TABLE item_info ADD COLUMN item_image_url TEXT")
+                logger.info("item_info 表 item_image_url 列添加完成")
 
             # 创建自动发货规则表
             cursor.execute('''
@@ -1709,6 +1738,98 @@ class DBManager:
                 logger.error(f"获取Cookie状态失败: {e}")
                 return True  # 出错时默认启用
 
+    # -------------------- 设备指纹（device_id / umid / x_mini_wua）--------------------
+    def get_account_fingerprint(self, cookie_id: str) -> Dict[str, Optional[str]]:
+        """读取账号的持久化设备指纹。
+        Returns:
+            { 'device_id': str|None, 'umid': str|None, 'x_mini_wua': str|None }
+        """
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    'SELECT device_id, umid, x_mini_wua FROM cookies WHERE id = ?',
+                    (cookie_id,)
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return {'device_id': None, 'umid': None, 'x_mini_wua': None}
+                return {'device_id': row[0], 'umid': row[1], 'x_mini_wua': row[2]}
+            except Exception as e:
+                logger.error(f"获取账号设备指纹失败: {cookie_id}, {e}")
+                return {'device_id': None, 'umid': None, 'x_mini_wua': None}
+
+    def save_account_fingerprint(self, cookie_id: str, device_id: Optional[str] = None,
+                                 umid: Optional[str] = None, x_mini_wua: Optional[str] = None) -> bool:
+        """保存账号的持久化设备指纹（仅写入非空字段）。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                sets = []
+                params = []
+                if device_id is not None:
+                    sets.append('device_id = ?'); params.append(device_id)
+                if umid is not None:
+                    sets.append('umid = ?'); params.append(umid)
+                if x_mini_wua is not None:
+                    sets.append('x_mini_wua = ?'); params.append(x_mini_wua)
+                if not sets:
+                    return True
+                params.append(cookie_id)
+                cursor.execute(f"UPDATE cookies SET {', '.join(sets)} WHERE id = ?", params)
+                self.conn.commit()
+                return cursor.rowcount > 0
+            except Exception as e:
+                logger.error(f"保存账号设备指纹失败: {cookie_id}, {e}")
+                return False
+
+    # -------------------- Token 持久化（避免重启强制刷新）--------------------
+    def get_account_token(self, cookie_id: str) -> Dict[str, Any]:
+        """读取持久化的 _m_h5_tk / _m_h5_tk_enc / 上次刷新时间。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    'SELECT m_h5_tk, m_h5_tk_enc, last_token_refresh_time FROM cookies WHERE id = ?',
+                    (cookie_id,)
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return {'m_h5_tk': None, 'm_h5_tk_enc': None, 'last_token_refresh_time': 0}
+                return {
+                    'm_h5_tk': row[0],
+                    'm_h5_tk_enc': row[1],
+                    'last_token_refresh_time': int(row[2] or 0),
+                }
+            except Exception as e:
+                logger.error(f"获取账号 token 持久化失败: {cookie_id}, {e}")
+                return {'m_h5_tk': None, 'm_h5_tk_enc': None, 'last_token_refresh_time': 0}
+
+    def save_account_token(self, cookie_id: str, m_h5_tk: Optional[str] = None,
+                           m_h5_tk_enc: Optional[str] = None,
+                           last_token_refresh_time: Optional[int] = None) -> bool:
+        """保存 token 相关字段；仅更新非 None 项。"""
+        with self.lock:
+            try:
+                cursor = self.conn.cursor()
+                sets = []
+                params: List[Any] = []
+                if m_h5_tk is not None:
+                    sets.append('m_h5_tk = ?'); params.append(m_h5_tk)
+                if m_h5_tk_enc is not None:
+                    sets.append('m_h5_tk_enc = ?'); params.append(m_h5_tk_enc)
+                if last_token_refresh_time is not None:
+                    sets.append('last_token_refresh_time = ?'); params.append(int(last_token_refresh_time))
+                if not sets:
+                    return True
+                params.append(cookie_id)
+                cursor.execute(f"UPDATE cookies SET {', '.join(sets)} WHERE id = ?", params)
+                self.conn.commit()
+                return cursor.rowcount > 0
+            except Exception as e:
+                logger.error(f"保存账号 token 持久化失败: {cookie_id}, {e}")
+                return False
+
     def get_all_cookie_status(self) -> Dict[str, bool]:
         """获取所有Cookie的启用状态"""
         with self.lock:
@@ -2815,13 +2936,13 @@ class DBManager:
     async def send_verification_email(self, email: str, code: str) -> bool:
         """发送验证码邮件"""
         try:
-            subject = "闲鱼自动回复系统 - 邮箱验证码"
+            subject = "闲鱼管理系统 - 邮箱验证码"
             # 使用简单的纯文本邮件内容
-            text_content = f"""【闲鱼自动回复系统】邮箱验证码
+            text_content = f"""【闲鱼管理系统】邮箱验证码
 
 您好！
 
-感谢您使用闲鱼自动回复系统。为了确保账户安全，请使用以下验证码完成邮箱验证：
+感谢您使用闲鱼管理系统。为了确保账户安全，请使用以下验证码完成邮箱验证：
 
 验证码：{code}
 
@@ -2832,11 +2953,11 @@ class DBManager:
 • 系统不会主动索要您的验证码
 
 如果您在使用过程中遇到任何问题，请联系我们的技术支持团队。
-感谢您选择闲鱼自动回复系统！
+感谢您选择闲鱼管理系统！
 
 ---
 此邮件由系统自动发送，请勿直接回复
-© 2025 闲鱼自动回复系统"""
+© 2025 闲鱼管理系统"""
 
             # 使用GET请求发送邮件
             api_url = "https://dy.zhinianboke.com/api/emailSend"
@@ -4209,6 +4330,7 @@ class DBManager:
                         item_category = item_data.get('item_category', '')
                         item_price = item_data.get('item_price', '')
                         item_detail = item_data.get('item_detail', '')
+                        item_image_url = item_data.get('item_image_url', '') or ''
 
                         if not cookie_id or not item_id:
                             continue
@@ -4221,13 +4343,15 @@ class DBManager:
                         # 使用 INSERT OR IGNORE + UPDATE 模式
                         cursor.execute('''
                         INSERT OR IGNORE INTO item_info (cookie_id, item_id, item_title, item_description,
-                                                       item_category, item_price, item_detail, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                                                       item_category, item_price, item_detail, item_image_url,
+                                                       created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                         ''', (cookie_id, item_id, item_title, item_description,
-                              item_category, item_price, item_detail))
+                              item_category, item_price, item_detail, item_image_url))
 
                         if cursor.rowcount == 0:
                             # 记录已存在，进行条件更新
+                            # 注意：item_image_url 在新值非空时强制覆盖（图片 CDN 链接会过期，需保持最新）
                             update_sql = '''
                             UPDATE item_info SET
                                 item_title = CASE WHEN (item_title IS NULL OR item_title = '') AND ? != '' THEN ? ELSE item_title END,
@@ -4235,6 +4359,7 @@ class DBManager:
                                 item_category = CASE WHEN (item_category IS NULL OR item_category = '') AND ? != '' THEN ? ELSE item_category END,
                                 item_price = CASE WHEN (item_price IS NULL OR item_price = '') AND ? != '' THEN ? ELSE item_price END,
                                 item_detail = CASE WHEN (item_detail IS NULL OR item_detail = '' OR TRIM(item_detail) = '') AND ? != '' THEN ? ELSE item_detail END,
+                                item_image_url = CASE WHEN ? != '' THEN ? ELSE item_image_url END,
                                 updated_at = CURRENT_TIMESTAMP
                             WHERE cookie_id = ? AND item_id = ?
                             '''
@@ -4244,6 +4369,7 @@ class DBManager:
                                 item_category, item_category,
                                 item_price, item_price,
                                 item_detail, item_detail,
+                                item_image_url, item_image_url,
                                 cookie_id, item_id
                             ))
 
